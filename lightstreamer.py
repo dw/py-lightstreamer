@@ -16,7 +16,9 @@ Example:
 """
 
 import Queue
+import httplib
 import logging
+import socket
 import threading
 import urllib
 import urllib2
@@ -54,19 +56,19 @@ OP_DELETE = 'delete'
 
 # All the itemEvent coming from the Data Adapter must be sent to the client
 # unchanged.
-MODE_RAW = 'raw'
+MODE_RAW = 'RAW'
 
 # The source provides updates of a persisting state (e.g. stock quote updates).
 # The absence of a field in an itemEvent is interpreted as "unchanged data".
 # Any "holes" must be filled by copying each field with the value in the last
 # itemEvent where the field had a value. Not all the itemEvents from the Data
 # Adapter need to be sent to the client.
-MODE_MERGE = 'merge'
+MODE_MERGE = 'MERGE'
 
 # The source provides events of the same type (e.g. statistical samplings or
 # news). The itemEvents coming from the Data Adapter must be sent to the client
 # unchanged. Not all the itemEvents need to be sent to the client.
-MODE_DISTINCT = 'distinct'
+MODE_DISTINCT = 'DISTINCT'
 
 # The itemEvents are interpreted as commands that indicate how to progressively
 # modify a list. In the schema there are two fields that are required to
@@ -74,7 +76,7 @@ MODE_DISTINCT = 'distinct'
 # identifies a line of the list generated from the Item. The "command" field
 # contains the command associated with the itemEvent, having a value of "ADD",
 # "UPDATE" or "DELETE".
-MODE_COMMAND = 'command'
+MODE_COMMAND = 'COMMAND'
 
 
 #
@@ -102,6 +104,10 @@ class ControlMessageFailed(Error):
     """
 
 
+#
+# Functions.
+#
+
 def make_op(op, table, data_adapter=None, id_=None, schema=None, selector=None,
         mode=None, buffer_size=None, max_frequency=None, snapshot=None):
     """Return a dict describing a control channel operation. The dict should be
@@ -127,6 +133,8 @@ def make_op(op, table, data_adapter=None, id_=None, schema=None, selector=None,
     """
     assert op in (OP_ADD, OP_ADD_SILENT, OP_START, OP_DELETE)
     assert mode in (None, MODE_RAW, MODE_MERGE, MODE_DISTINCT, MODE_COMMAND)
+    assert id_ or op not in (OP_ADD,), \
+        'id_ parameter required for OP_ADD.'
 
     dct = {
         'LS_table': table,
@@ -143,7 +151,7 @@ def make_op(op, table, data_adapter=None, id_=None, schema=None, selector=None,
     add_if('LS_mode', mode)
     add_if('LS_requested_buffer_size', buffer_size)
     add_if('LS_requested_max_frequency', max_frequency)
-    add_if('LS_snapshot', snapshot)
+    add_if('LS_snapshot', snapshot, lambda: str(snapshot).lower())
     return dct
 
 
@@ -177,6 +185,39 @@ def _encode_op(dct, session_id):
     dct['LS_session'] = session_id
     return urllib.urlencode(dct)
 
+
+#
+# Python >= 2.6 made block buffering default in urllib2. Unfortunately this
+# breaks .readline(). These classes force it back off.
+#
+
+class UnbufferedHTTPConnection(httplib.HTTPConnection):
+    def getresponse(self, buffering=False):
+        return httplib.HTTPConnection.getresponse(self, False)
+
+class UnbufferedHTTPHandler(urllib2.HTTPHandler):
+    def http_open(self, req):
+        socket._fileobject.default_bufsize = 1
+        try:
+            return self.do_open(UnbufferedHTTPConnection, req)
+        finally:
+            socket._fileobject.default_bufsize = 8192
+
+class UnbufferedHTTPSConnection(httplib.HTTPSConnection):
+    def getresponse(self, buffering=False):
+        return httplib.HTTPSConnection.getresponse(self, False)
+
+class UnbufferedHTTPSHandler(urllib2.HTTPSHandler):
+    def https_open(self, req):
+        socket._fileobject.default_bufsize = 1
+        try:
+            return self.do_open(UnbufferedHTTPSConnection, req)
+        finally:
+            socket._fileobject.default_bufsize = 8192
+
+#
+# Event listener implementations.
+#
 
 class ListenerBase(object):
     """Base implementation for listener classes. Dispatches messages in the
@@ -266,15 +307,15 @@ class LsClient(object):
         to receive messages.
         """
         self.base_url = base_url
+        self.listener = listener
+
         self.log = logging.getLogger('LsClient')
-        self.listeners = []
         self._table_id = 0
-        self._ready = threading.Event()
         self._running = True
         self._session = None
-        self._thread = threading.Thread(target=self._recv_main)
-        self._thread.setDaemon(True)
-        self._thread.start()
+        self._thread = None
+        self.opener = urllib2.build_opener(
+            UnbufferedHTTPHandler, UnbufferedHTTPSHandler)
 
     def _url(self, suffix, *args, **kwargs):
         if args:
@@ -290,7 +331,7 @@ class LsClient(object):
         req = urllib2.Request(url, data=urllib.urlencode(kwargs))
         self.log.debug('POST %r %r', url, kwargs)
         try:
-            return urllib2.urlopen(req)
+            return self.opener.open(req)
         except urllib2.HTTPError, e:
             self.log.exception(e.read())
             return e
@@ -318,27 +359,31 @@ class LsClient(object):
         table, item = map(int, bits[0].split(','))
         self.listener.on_update(table, item, bits[1:])
 
-    def _do_recv(self):
+    def _bind_session(self):
         self.log.debug('Making post...')
-        fp = self._post('bind_session.txt',
+        self.fp = self._post('bind_session.txt',
             LS_Session=self._session['SessionId'])
+
+    def _do_recv(self):
         self.log.debug('POST returned.')
         try:
-            for line in iter(fp.readline, ''):
-                self.log.debug('Got Line: %r', line)
+            for line in iter(self._fp.readline, ''):
                 self._recv_line(line)
         finally:
-            fp.close()
+            self._fp.close()
 
     def _recv_main(self):
         while True:
-            self._ready.wait()
-            self._ready.clear()
             self.log.debug('receive thread running.')
             try:
                 self._do_recv()
             except Terminated:
                 continue
+
+    def _start_recv(self):
+        self._thread = threading.Thread(target=self._recv_main)
+        self._thread.setDaemon(True)
+        self._thread.start()
 
     def alloc_table(self):
         """Return the next free table ID.
@@ -346,23 +391,26 @@ class LsClient(object):
         self._table_id += 1
         return self._table_id
 
-    def _parse_create_session_response(self, s):
-        print 'here'
-        it = iter(s.split('\r\n'))
-        print repr(s)
-        line = next(it)
-        if line.startswith('ERROR'):
-            raise CreateSessionFailed('%s: %s' % (next(it), next(it)))
-        self._session = dict(line.split(': ', 1) for line in it if line)
+    def _readline(self):
+        return self._fp.readline().rstrip('\r\n')
+
+    def _parse_create_session_response(self):
+        status = self._readline()
+        if status.startswith('ERROR'):
+            raise CreateSessionFailed('%s: %s' %\
+                (self._readline(), self._readline()))
+        self._session = dict(line.split(':', 1)
+                             for line in iter(self._readline, ''))
+        self.log.debug('Create session: %r %r', status, self._session)
 
     def create_session(self, username, adapter_set, password=None,
             max_bandwidth_kbps=None, content_length=None, keepalive_ms=None,
             report_info=None):
+        assert not self._thread
+
         dct = {
             'LS_user': username,
-            'LS_adapter_set': adapter_set,
-            # Only for initial connection.
-            'LS_polling': 'true'
+            'LS_adapter_set': adapter_set
         }
         if password:
             dct['LS_password'] = password
@@ -376,13 +424,9 @@ class LsClient(object):
             dct['LS_report_info'] = int(bool(report_info))
 
         self.log.debug('POST %r', dct)
-        fp = self._post('create_session.txt', **dct)
-        try:
-            self._parse_create_session_response(fp.read())
-        finally:
-            fp.close()
-
-        self._ready.set()
+        self._fp = self._post('create_session.txt', **dct)
+        self._parse_create_session_response()
+        self._start_recv()
 
     def _parse_send_control_response(self, s):
         it = iter(s.split('\r\n'))
@@ -399,10 +443,18 @@ class LsClient(object):
         if not isinstance(ops, list):
             ops = [ops]
 
-        self.log.debug('Sending controls: %r', ops)
-        req = urllib2.Request(self._url(suffix), data='\r\n'.join(
-            _encode_op(op, self._session['SessionId']) for op in ops))
-        fp = urllib2.urlopen(req)
+        bits = (_encode_op(op, self._session['SessionId']) for op in ops)
+        data = '\r\n'.join(bits)
+        self.log.debug('Sending controls: %r', data)
+        req = urllib2.Request(self._url('control.txt'), data)
+
+        try:
+            fp = self.opener.open(req)
+        except urllib2.HTTPError, e:
+            print 'EEK', e.read()
+            raw_input()
+            raise
+
         try:
             return self._parse_send_control_response(fp.read())
         finally:
