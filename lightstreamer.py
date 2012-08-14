@@ -8,12 +8,14 @@ Example:
         def on_update(self, data):
             print 'UPDATE!', data
 
-    client = LsClient('http://www.example.com/', MyListener())
+    client = LsClient('http://www.example.com/')
     client.create_session(username='me', adapter_set='MyAdaptor'
+    table_id = client.make_table(MyListener())
     client.send_control([
-        make_op(lightstreamer.OP_ADD, table=1, id_='my_id', schema='my_schema')
+        make_add(table=table_id, id_='my_id', schema='my_schema')
     ])
 """
+
 
 import Queue
 import httplib
@@ -186,9 +188,31 @@ def _encode_op(dct, session_id):
     return urllib.urlencode(dct)
 
 
+def _decode_field(s, prev=None):
+    """Decode a single field according to the Lightstreamer encoding rules.
+        1. Literal '$' is the empty string.
+        2. Literal '#' is null (None).
+        3. Literal '' indicates unchanged since previous update.
+        4. If the string starts with either '$' or '#', but is not length 1,
+           trim the first character.
+        5. Unicode escapes of the form '\uXXXX' are unescaped.
+
+    Returns the decoded Unicode string.
+    """
+    if s == '$':
+        return u''
+    elif s == '#':
+        return None
+    elif s == '':
+        return prev
+    elif s[0] in '$#':
+        s = s[1:]
+    return s.decode('unicode_escape')
+
+
 #
 # Python >= 2.6 made block buffering default in urllib2. Unfortunately this
-# breaks .readline(). These classes force it back off.
+# breaks .readline() on a streamy HTTP response. These classes force it off.
 #
 
 class UnbufferedHTTPConnection(httplib.HTTPConnection):
@@ -221,8 +245,8 @@ class UnbufferedHTTPSHandler(urllib2.HTTPSHandler):
 
 class ListenerBase(object):
     """Base implementation for listener classes. Dispatches messages in the
-    client receive loop thread. Note long running callbacks will block further
-    message reception.
+    client receive loop thread. Note long running callbacks may result in
+    server-side overflows and therefore dropped messages.
     """
     def __init__(self):
         self.log = logging.getLogger(self.__class__.__name__)
@@ -301,16 +325,18 @@ class ThreadedListenerBase(ListenerBase):
 
 
 class LsClient(object):
-    def __init__(self, base_url, listener):
+    def __init__(self, base_url):
         """Create an instance, using `base_url` as the root URL for the
         Lightstreamer installation, and `listener` as the ListenerBase instance
         to receive messages.
         """
         self.base_url = base_url
-        self.listener = listener
-
         self.log = logging.getLogger('LsClient')
         self._table_id = 0
+        self._table_listener_map = {}
+        # (table_id, row_id) -> ["last", "complete", "row"]. For reconstructing
+        # partial updates.
+        self._last_item_map = {}
         self._running = True
         self._session = None
         self._thread = None
@@ -338,34 +364,38 @@ class LsClient(object):
         finally:
             self.log.debug('POST %r complete.', url)
 
-    def _recv_line(self, line):
-        self.log.debug('Received line: %r', line)
-        bits = line.split()
-
-        if bits[0] == 'PROBE':
-            self.log.debug('Received server probe.')
-            return True
-        elif bits[0] == 'LOOP':
-            self.log.debug('Server indicated length exceeded; reconnecting.')
-            return False
-        elif bits[0] == 'END':
-            self.log.error('Server permanently closed our session! %r', bits)
-            raise Terminated
-
-        # Data line.
-        bits = line.split('|')
+    def _dispatch_line(self, line):
+        bits = line.rstrip('\r\n').split('|')
         assert len(bits) > 1 and ',' in bits[0], bits
 
-        table, item = map(int, bits[0].split(','))
-        self.listener.on_update(table, item, bits[1:])
+        table_id, item_id = map(int, bits[0].split(','))
+        listener = self._table_listener_map.get(table_id)
+        if not listener:
+            self.log.warning('Table %r not in map; dropping row', table_id)
+            return
 
-    def _bind_session(self):
-        self.log.debug('Making post...')
-        self.fp = self._post('bind_session.txt',
-            LS_Session=self._session['SessionId'])
+        tup = (table_id, item_id)
+        last_map = dict(enumerate(self._last_item_map.get(tup, [])))
+        fields = [_decode_field(s, last_map.get(i))
+                  for i, s in enumerate(bits[1:])]
+        self._last_item_map[tup] = fields
+        listener.dispatch(listener.on_update, table_id, item_id, fields)
+
+    def _recv_line(self, line):
+        if line.startswith('PROBE'):
+            self.log.debug('Received server probe.')
+            return True
+        elif line.startswith('LOOP'):
+            self.log.debug('Server indicated length exceeded; reconnecting.')
+            return False
+        elif line.startswith('END'):
+            self.log.error('Server permanently closed our session! %r', line)
+            raise Terminated
+        else:
+            # Update event.
+            self._dispatch_line(line)
 
     def _do_recv(self):
-        self.log.debug('POST returned.')
         try:
             for line in iter(self._fp.readline, ''):
                 self._recv_line(line)
@@ -378,17 +408,25 @@ class LsClient(object):
             try:
                 self._do_recv()
             except Terminated:
-                continue
+                break
 
     def _start_recv(self):
         self._thread = threading.Thread(target=self._recv_main)
         self._thread.setDaemon(True)
         self._thread.start()
 
-    def alloc_table(self):
-        """Return the next free table ID.
+    def join(self):
+        """Wait for the receive thread to terminate.
+        """
+        assert self._thread
+        self._thread.join()
+
+    def make_table(self, listener):
+        """Allocate a table ID and associate it with the given `listener`. The
+        new table ID is returned.
         """
         self._table_id += 1
+        self._table_listener_map[self._table_id] = listener
         return self._table_id
 
     def _readline(self):
@@ -448,15 +486,8 @@ class LsClient(object):
         self.log.debug('Sending controls: %r', data)
         req = urllib2.Request(self._url('control.txt'), data)
 
-        try:
-            fp = self.opener.open(req)
-        except urllib2.HTTPError, e:
-            print 'EEK', e.read()
-            raw_input()
-            raise
-
+        fp = self.opener.open(req)
         try:
             return self._parse_send_control_response(fp.read())
         finally:
             fp.close()
-
