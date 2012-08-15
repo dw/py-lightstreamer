@@ -19,16 +19,19 @@
 """Quick'n'dirty blocking Lightstreamer HTTP streaming client for Python.
 
 Example:
-    class MyListener(lightstreamer.ThreadedListenerBase):
-        def on_connection_state(self, state):
-            print 'CONNECTION STATE:', state
+    def on_connection_state(state):
+        print 'CONNECTION STATE:', state
 
-        def on_update(self, data):
-            print 'UPDATE!', data
+    def on_update(table_id, item_id, data):
+        print 'UPDATE!', data
 
-    client = LsClient('http://www.example.com/')
-    client.create_session(username='me', adapter_set='MyAdaptor'
-    table_id = client.make_table(MyListener())
+    disp = lightstreamer.Dispatcher()
+    disp.listen(lightstreamer.EVENT_STATE, on_connection_state)
+    disp.listen(lightstreamer.EVENT_UPDATE, on_update)
+
+    client = LsClient('http://www.example.com/', disp)
+    client.create_session(username='me', adapter_set='MyAdaptor')
+    table_id = client.make_table(disp)
     client.send_control([
         make_add(table=table_id, id_='my_id', schema='my_schema')
     ])
@@ -88,6 +91,40 @@ MODE_DISTINCT = 'DISTINCT'
 # contains the command associated with the itemEvent, having a value of "ADD",
 # "UPDATE" or "DELETE".
 MODE_COMMAND = 'COMMAND'
+
+# In the process of connecting. A healthy connection will alternate between
+# CONNECTING and CONNECTED states as LS_content_length is exceeded.
+STATE_CONNECTING = 'connecting'
+
+# Connected and forwarding messages.
+STATE_CONNECTED = 'connected'
+
+# Cannot connect, but will retry shortly.
+STATE_RECONNECTING = 'reconnecting'
+
+# Could not connect and will not retry because the server indicated a permanent
+# error. After entering this state the thread stops, and session information is
+# cleared. You must call create_session() to restart the session.  This is the
+# default state.
+STATE_DISCONNECTED = 'disconnected'
+
+# Called when the receive connection state changes. Sole argument, `state`, is
+# one of the STATE_* constants."""
+EVENT_STATE = 'on_connection_state'
+
+# Fired when the client receives a new update message (i.e. data). Receives 3
+# arguments: table_id, item_id, and msg.
+EVENT_UPDATE = 'on_update'
+
+# Called when the server indicates the first set of update messages
+# representing a snapshot have been sent successfully.
+EVENT_END_OF_SNAPSHOT = 'on_end_of_snapshot'
+
+# Called when the server indicates its internal message queue overflowed.
+EVENT_OVERFLOW = 'on_overflow'
+
+# Called when an attempted push message could not be delivered.
+EVENT_PUSH_ERROR = 'on_push_error'
 
 
 class Error(Exception):
@@ -240,7 +277,7 @@ class UnbufferedHTTPSHandler(urllib2.HTTPSHandler):
             socket._fileobject.default_bufsize = 8192
 
 
-class ListenerBase(object):
+class Dispatcher(object):
     """Base implementation for listener classes. Dispatches messages in the
     client receive loop thread. Note long running callbacks may result in
     server-side overflows and therefore dropped messages.
@@ -248,46 +285,47 @@ class ListenerBase(object):
     def __init__(self):
         """Create an instance."""
         self.log = logging.getLogger(self.__class__.__name__)
+        # name -> [list, of, listener, funcs]
+        self._event_map = {}
 
-    def dispatch(self, funcname, *args, **kwargs):
+    def listening(self, event):
+        """Return a count of subscribers to `event`."""
+        return len(self._event_map.get(event, []))
+
+    def listen(self, event, func):
+        """Subscribe `func` to be called when `event` is dispatched. The
+        function will be called with the arguments documented for `event`."""
+        listeners = self._event_map.setdefault(event, [])
+        if func in listeners:
+            self.log.warning('%r already subscribed to %r', func, event)
+        else:
+            listeners.append(func)
+
+    def unlisten(self, event, func):
+        """Unsubscribe `func` from `event`."""
+        listeners = self._event_map.get(event, [])
+        try:
+            listeners.remove(func)
+        except ValueError:
+            self.log.warning('%r was not subscribed to %r', func, event)
+
+    def dispatch(self, event, *args, **kwargs):
         """Decide how to dispatch `method(*args, **kwargs)`. By default, we
         simply call it immediately."""
-        try:
-            getattr(self, funcname)(*args, **kwargs)
-        except Exception:
-            self.log.exception('While invoking %r(*%r, **%r)',
-                funcname, args, kwargs)
-
-    def on_connection_state(self, state):
-        """Called when the connection state changes (e.g. receive loop
-        connected, receive loop disconnected)."""
-        self.log.debug('on_connection_state(): %r', state)
-
-    def on_update(self, table, item, msg):
-        """Called when the client receives a new update message (i.e. data)."""
-        self.log.debug('on_update(): (%r, %r): %r', table, item, msg)
-
-    def on_end_of_snapshot(self):
-        """Called when the server indicates the first set of update messages
-        representing a snapshot have been sent successfully."""
-        self.log.debug('on_end_of_snapshot()')
-
-    def on_overflow(self):
-        """Called when the server indicates its internal message queue
-        overflowed."""
-        self.log.debug('on_overflow()')
-
-    def on_push_error(self):
-        """Called when an attempted push message could not be delivered."""
-        self.log.debug('on_push_error()')
+        for listener in self._event_map.get(event, []):
+            try:
+                listener(*args, **kwargs)
+            except Exception:
+                self.log.exception('While invoking %r(*%r, **%r)',
+                    event, args, kwargs)
 
 
-class ThreadedListenerBase(ListenerBase):
-    """Like ListenerBase, except dispatch messages in a private thread, to
-    avoid blocking the receive loop."""
+class ThreadedDispatcher(Dispatcher):
+    """Like Dispatcher, except dispatch messages in a private thread, to avoid
+    blocking the caller."""
     def __init__(self):
         """Create an instance."""
-        self.log = logging.getLogger(self.__class__.__name__)
+        super(ThreadedDispatcher, self).__init__()
         self.queue = Queue.Queue()
         self.thread = threading.Thread(target=self._main)
         self.thread.setDaemon(True)
@@ -309,11 +347,9 @@ class ThreadedListenerBase(ListenerBase):
             if tup is None:
                 self.log.info('Got shutdown semaphore; exitting.')
                 return
-            try:
-                funcname, args, kwargs = tup
-                getattr(self, funcname)(*args, **kwargs)
-            except Exception:
-                self.log.exception('While dispatching %r', tup)
+            funcname, args, kwargs = tup
+            super(ThreadedDispatcher, self).dispatch(
+                funcname, *args, **kwargs)
 
 
 class LsClient(object):
@@ -325,11 +361,13 @@ class LsClient(object):
     thread exits, the receive thread dies. In order to ensure correct
     operation, the main thread should not be allowed to exit 
     """
-    def __init__(self, base_url):
-        """Create an instance, using `base_url` as the root URL for the
-        Lightstreamer installation, and `listener` as the ListenerBase instance
-        to receive messages."""
+    def __init__(self, base_url, daemon=True):
+        """Create an instance using `base_url` as the root of the Lightstreamer
+        server. If `daemon` is True, the client shuts down when the program's
+        main thread exits, otherwise the program will not exit until the client
+        is explicitly shut down."""
         self.base_url = base_url
+        self.daemon = daemon
         self.log = logging.getLogger('LsClient')
         self._table_id = 0
         # table_id -> ListenerBase instance.
@@ -337,28 +375,28 @@ class LsClient(object):
         # table_id, row_id -> ["last", "complete", "row"]
         self._last_item_map = {}
         self._session = {}
+        self._state = STATE_DISCONNECTED
         self._thread = None
         self.opener = urllib2.build_opener(
             UnbufferedHTTPHandler, UnbufferedHTTPSHandler)
 
-    def _url(self, suffix, *args, **kwargs):
-        """Compose a URL by joining `suffix` to self.base_url, interpolating
-        `args` if provided, and concatenating `kwargs` as the query string."""
-        if args:
-            suffix %= args
-        if kwargs:
-            encoded = urllib.urlencode(kwargs)
-            suffix += '&' if '?' in suffix else '?'
-            suffix += encoded
-        return urlparse.urljoin(self.base_url, suffix)
+    def _set_state(self, state):
+        """Emit an event indicating the connection state has changed, taking
+        care not to emit duplicate events."""
+        if self._state != state:
+            self._state = state
+            self.dispatcher.dispatch(EVENT_STATE, state)
 
     def _post(self, suffix, data):
-        url = self._url(suffix)
+        """Perform an HTTP post to `suffix`, logging before and after. If an
+        HTTP exception is thrown, log an error and return the exception."""
+        url = urlparse.urljoin(self.base_url, suffix)
         self.log.debug('POST %r %r', url, data)
         req = urllib2.Request(url, data=data)
         try:
             return self.opener.open(req)
         except urllib2.HTTPError, e:
+            self.log.error('HTTP %d for %r', e.getcode(), url)
             return e
         finally:
             self.log.debug('POST %r complete.', url)
@@ -402,13 +440,16 @@ class LsClient(object):
             return True
 
     def _do_recv(self):
-        params = {
-            'LS_session': self._session['SessionId']
-        }
+        """Connect to bind_session.txt and dispatch messages until the server
+        tells us to stop or an error occurs."""
         self.log.debug('Attempting to connect..')
-        fp = self._post('bind_session.txt', urllib.urlencode(params))
+        self.set_state(STATE_CONNECTING)
+        fp = self._post('bind_session.txt', urllib.urlencode({
+            'LS_session': self._session['SessionId']
+        }))
         self._parse_and_raise_status(fp)
         self._parse_session_info(fp)
+        self._set_state(STATE_CONNECTED)
         try:
             for line in fp:
                 if not self._recv_line(line):
@@ -430,38 +471,52 @@ class LsClient(object):
                 continue
             except TransientError, e:
                 self.log.exception('')
+                self._set_state(STATE_CONNECTING)
                 fail_start = fail_start or time.time()
                 time.sleep(min(60, 1 ** int(time.time() - fail_start)))
             except Exception, e:
                 self.log.exception('')
                 break
+
+        self._set_state(STATE_DISCONNECTED)
         self._thread = None
+        self._session.clear()
         self.log.info('Receive thread exiting')
 
     def join(self):
         """Wait for the receive thread to terminate."""
-        assert self._thread
-        self._thread.join()
+        if self._thread:
+            self._thread.join()
 
-    def make_table(self, listener):
+    def make_table(self, dispatcher=None):
         """Allocate a table ID and associate it with the given `listener`. The
-        new table ID is returned."""
+        new table ID is returned. If `dispatcher` is given, use it instead of
+        the session's Dispatcher instance to dispatch update events for this
+        table."""
         self._table_id += 1
-        self._table_listener_map[self._table_id] = listener
+        dispatcher = dispatcher or self.dispatcher
+        self._table_listener_map[self._table_id] = dispatcher
         return self._table_id
 
-    def _parse_and_raise_status(self, fp):
+    def _parse_and_raise_status(self, fp, fail_state=None):
         """Parse the status part of a control/session create/bind response.
         Either a single "OK", or "ERROR" followed by the error description. If
-        ERROR, raise RequestFailed.
+        ERROR, raise RequestFailed. If `fail_state` is provided, emit an event
+        indicating the given state on failure.
         """
         if fp.getcode() != 200:
+            if fail_state:
+                self._set_state(fail_state)
             raise TransientError('HTTP status %d', fp.getcode())
         more = lambda: fp.readline().rstrip('\r\n')
         if not more().startswith('OK'):
+            if fail_state:
+                self._set_state(fail_state)
             raise TransientError('%s: %s' % (more(), more()))
 
     def _parse_session_info(self, fp):
+        """Parse the headers from `fp` sent immediately following an OK
+        message, and store them in self.session."""
         self._session = {}
         for line in fp:
             if not line.rstrip():
@@ -472,9 +527,8 @@ class LsClient(object):
 
     def create_session(self, username, adapter_set, password=None,
             max_bandwidth_kbps=None, content_length=None, keepalive_ms=None):
-        """Attempt to authenticate with Lightstreamer, and start the receive
-        thread.
-        
+        """Authenticate with Lightstreamer and start the receive thread.
+
         `username` is the Lightstreamer username (required).
         `adapter_set` is the adapter set name to use (required).
         `password` is the Lightstreamer password.
@@ -505,13 +559,12 @@ class LsClient(object):
         self._parse_and_raise_status(fp)
         self._parse_session_info(fp)
         self._thread = threading.Thread(target=self._recv_main)
-        self._thread.setDaemon(True)
+        self._thread.setDaemon(self.daemon)
         self._thread.start()
 
     def send_control(self, ops):
         """Send one or more control messages to the server. `ops` is either a
-        single dict returned by `make_op()`, or a list of dicts.
-        """
+        single dict returned by `make_op()`, or a list of dicts."""
         assert self._session['SessionId']
         if not isinstance(ops, list):
             ops = [ops]
