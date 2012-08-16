@@ -1,0 +1,13 @@
+    * Teach send_control() to pay attention to LS_request_limit.
+    * Move send_control() processing to a private thread queue, add an event to
+      indicate request success/failure. Use the same queue for event delivery,
+      kill ThreadedDispatcher.
+    * Rename LsClient -> LsSession, create new class to handle IO.
+    * Move create_session() and connection reestablishment to the thread queue,
+      make do with Python's crappy httplib and use a select loop in a ingle
+      thread to detect data on any session (maximum of 2 threads per app now).
+    * Investigate the smallest async IO solution, if any. Consider padding out
+      select loop just enough to handle write too, write a minimal asyncronous
+      HTTP client.
+    * Consider adding a little more rich BusinessObjects, e.g. Table object,
+      although it's probably desirable to avoid this.
