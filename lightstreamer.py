@@ -439,7 +439,8 @@ class LsClient(object):
             self.log.warning('Dropping strange update line: %r', line)
             return
 
-        table_id, item_id = map(int, bits[0].split(','))
+        it = iter(bits)
+        table_id, item_id = map(int, it.next().split(','))
         dispatcher = self._table_listener_map.get(table_id)
         if not dispatcher:
             self.log.warning('Table %r not in map; dropping row', table_id)
@@ -447,8 +448,7 @@ class LsClient(object):
 
         tup = (table_id, item_id)
         last_map = dict(enumerate(self._last_item_map.get(tup, [])))
-        fields = [_decode_field(s, last_map.get(i))
-                  for i, s in enumerate(bits[1:])]
+        fields = [_decode_field(s, last_map.get(i)) for i, s in enumerate(it)]
         self._last_item_map[tup] = fields
         self._dispatch(dispatcher, EVENT_UPDATE, table_id, item_id, fields)
 
