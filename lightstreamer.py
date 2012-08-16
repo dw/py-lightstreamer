@@ -174,8 +174,13 @@ def make_op(op, table, data_adapter=None, id_=None, schema=None, selector=None,
     """
     assert op in (OP_ADD, OP_ADD_SILENT, OP_START, OP_DELETE)
     assert mode in (None, MODE_RAW, MODE_MERGE, MODE_DISTINCT, MODE_COMMAND)
-    assert id_ or op not in (OP_ADD,), \
-        'id_ parameter required for OP_ADD.'
+
+    if op in (OP_ADD, OP_ADD_SILENT):
+        if not id_:
+            raise ValueError('id_ must be specified for ADD/ADD_SILENT')
+        if not mode:
+            raise ValueError('mode must be specified for ADD/ADD_SILENT')
+
     return make_dict((
         ('LS_table', table),
         ('LS_op', op),
@@ -312,7 +317,11 @@ class Dispatcher(object):
     def dispatch(self, event, *args, **kwargs):
         """Decide how to dispatch `method(*args, **kwargs)`. By default, we
         simply call it immediately."""
-        for listener in self._event_map.get(event, []):
+        listeners = self._event_map.get(event)
+        if not listeners:
+            self.log.debug('got %r but nobody is listening for that', event)
+            return
+        for listener in listeners:
             try:
                 listener(*args, **kwargs)
             except Exception:
@@ -361,13 +370,15 @@ class LsClient(object):
     thread exits, the receive thread dies. In order to ensure correct
     operation, the main thread should not be allowed to exit 
     """
-    def __init__(self, base_url, daemon=True):
+    def __init__(self, base_url, dispatcher, daemon=True, content_length=None):
         """Create an instance using `base_url` as the root of the Lightstreamer
         server. If `daemon` is True, the client shuts down when the program's
         main thread exits, otherwise the program will not exit until the client
         is explicitly shut down."""
         self.base_url = base_url
+        self.dispatcher = dispatcher
         self.daemon = daemon
+        self.content_length = content_length
         self.log = logging.getLogger('LsClient')
         self._table_id = 0
         # table_id -> ListenerBase instance.
@@ -385,6 +396,7 @@ class LsClient(object):
         care not to emit duplicate events."""
         if self._state != state:
             self._state = state
+            self.log.debug('New state: %r', state)
             self.dispatcher.dispatch(EVENT_STATE, state)
 
     def _post(self, suffix, data):
@@ -443,13 +455,16 @@ class LsClient(object):
         """Connect to bind_session.txt and dispatch messages until the server
         tells us to stop or an error occurs."""
         self.log.debug('Attempting to connect..')
-        self.set_state(STATE_CONNECTING)
-        fp = self._post('bind_session.txt', urllib.urlencode({
-            'LS_session': self._session['SessionId']
-        }))
+        self._set_state(STATE_CONNECTING)
+        fp = self._post('bind_session.txt', urllib.urlencode(make_dict((
+            ('LS_session', self._session['SessionId']),
+            ('LS_content_length', self.content_length)
+        ))))
         self._parse_and_raise_status(fp)
         self._parse_session_info(fp)
         self._set_state(STATE_CONNECTED)
+        self.log.debug('Server reported Content-length: %s',
+            fp.headers.get('Content-length'))
         try:
             for line in fp:
                 if not self._recv_line(line):
