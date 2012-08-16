@@ -505,28 +505,28 @@ class LsClient(object):
         """Receive thread main function. Calls _do_recv() in a loop, optionally
         delaying if a transient error occurs."""
         self.log.debug('receive thread running.')
-        fail_start = 0.0
-        fail_count = 0
+        fail_ts = 0.0
         running = True
         while running:
             try:
                 running = self._do_recv()
-                fail_start = 0.0
-                continue
+                fail_ts = 0.0
             except Exception, e:
-                self.log.exception('_do_recv failure')
                 if self._is_transient_error(e):
-                    self.log.exception('_do_recv failed')
+                    fail_ts = fail_time or time.time()
+                    fail_wait = min(60, 2 ** int(time.time() - fail_ts))
+                    self.log.info('Error: %s: %s (reconnect in %.2fs)',
+                        e.__class__.__name__, e, fail_wait)
                     self._set_state(STATE_CONNECTING)
-                    fail_start = fail_start or time.time()
-                    time.sleep(min(60, 1 ** int(time.time() - fail_start)))
+                    time.sleep(fail_wait)
                 else:
+                    self.log.exception('_do_recv failure')
                     break
 
-            self._set_state(STATE_DISCONNECTED)
-            self._thread = None
-            self._session.clear()
-            self.log.info('Receive thread exiting')
+        self._set_state(STATE_DISCONNECTED)
+        self._thread = None
+        self._session.clear()
+        self.log.info('Receive thread exiting')
 
     def join(self):
         """Wait for the receive thread to terminate."""

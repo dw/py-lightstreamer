@@ -18,3 +18,10 @@
     * Add bytes/events stats.
     * Stop using httplib entirely, it's an unreliable mess with semantics
       broken across Python versions.
+    * Pay attention to server-advertised hostname in the session response,
+      otherwise load balancers are likely to kick us due to inactivity.
+      IMPORTANT.
+    * Detect network breakage more speedily: set a low LS_keepalive_millis (say
+      1000), then a socket timeout of about 3x that. The goal being steady flow
+      of messages, and avoiding the cost of long time to detect failure and
+      resulting session expiry/reestablishment.
