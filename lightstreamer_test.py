@@ -19,8 +19,10 @@
 import threading
 import unittest
 
+from lightstreamer import TransientError
 from lightstreamer import Dispatcher
-from lightstreamer import ThreadedDispatcher
+from lightstreamer import LsClient
+from lightstreamer import WorkQueue
 from lightstreamer import _decode_field
 
 
@@ -76,12 +78,12 @@ class DispatcherTestCase(unittest.TestCase):
         assert self.fired1 == []
 
 
-class ThreadedDispatcherTestCase(unittest.TestCase):
+class WorkQueueTestCase(unittest.TestCase):
     def setUp(self):
-        self.disp = ThreadedDispatcher()
+        self.wq = WorkQueue()
 
     def tearDown(self):
-        self.disp.stop()
+        self.wq.stop()
 
     def _capture_thread(self):
         self.invoking_thread = threading.currentThread()
@@ -89,8 +91,7 @@ class ThreadedDispatcherTestCase(unittest.TestCase):
 
     def test_fire(self):
         self.sem = threading.Semaphore(0)
-        self.disp.listen('eek', self._capture_thread)
-        self.disp.dispatch('eek')
+        self.wq.push(self._capture_thread)
         self.sem.acquire()
         assert self.invoking_thread != threading.currentThread()
 
@@ -117,6 +118,17 @@ class DecodeFieldTestCase(unittest.TestCase):
 
     def test_unicode_escape(self):
         self.assertEqual(_decode_field(r'\u2603'), u'\N{SNOWMAN}')
+
+
+class LsClientTestCase(unittest.TestCase):
+    def test_is_transient_error(self):
+        import socket
+        import urllib2
+        is_transient_error = LsClient('', None)._is_transient_error
+        assert is_transient_error(socket.error())
+        assert is_transient_error(urllib2.URLError(socket.error()))
+        assert is_transient_error(TransientError('eek'))
+        assert not is_transient_error(urllib2.URLError('apocalypse'))
 
 
 if __name__ == '__main__':

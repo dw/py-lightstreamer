@@ -11,3 +11,10 @@
       HTTP client.
     * Consider adding a little more rich BusinessObjects, e.g. Table object,
       although it's probably desirable to avoid this.
+    * HTTP timeouts.
+    * Permanent fix for the nasty mess changing global socket._fileobject
+      state. Not a matter of if but when it will break.
+    * Add locking to various places, e.g. LsClient._state.
+    * Add bytes/events stats.
+    * Stop using httplib entirely, it's an unreliable mess with semantics
+      broken across Python versions.
