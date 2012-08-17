@@ -24,6 +24,7 @@ from lightstreamer import Dispatcher
 from lightstreamer import LsClient
 from lightstreamer import WorkQueue
 from lightstreamer import _decode_field
+from lightstreamer import _replace_url_host
 
 
 class DispatcherTestCase(unittest.TestCase):
@@ -118,6 +119,16 @@ class DecodeFieldTestCase(unittest.TestCase):
 
     def test_unicode_escape(self):
         self.assertEqual(_decode_field(r'\u2603'), u'\N{SNOWMAN}')
+
+
+class ReplaceUrlHostTestCase(unittest.TestCase):
+    def repl(self, old, new, repl=None):
+        self.assertEqual(new, _replace_url_host(old, repl))
+
+    def test_replace_url_host(self):
+        self.repl('http://google.com/', 'http://google.com/')
+        self.repl('http://google.com/', 'http://go-ogle.com/', 'go-ogle.com')
+        self.repl('ftp://fish:9188/', 'ftp://localhost/', 'localhost')
 
 
 class LsClientTestCase(unittest.TestCase):

@@ -21,20 +21,24 @@
 Example:
     def on_connection_state(state):
         print 'CONNECTION STATE:', state
+        if state == lightstreamer.STATE_DISCONNECTED:
+            connect()
 
     def on_update(table_id, item_id, data):
         print 'UPDATE!', data
 
+    def connect():
+        client.create_session(username='me', adapter_set='MyAdaptor')
+        table_id = client.make_table(disp)
+        client.send_control([
+            make_add(table=table_id, id_='my_id', schema='my_schema')
+        ])
+
     disp = lightstreamer.Dispatcher()
     disp.listen(lightstreamer.EVENT_STATE, on_connection_state)
     disp.listen(lightstreamer.EVENT_UPDATE, on_update)
-
     client = lightstreamer.LsClient('http://www.example.com/', disp)
-    client.create_session(username='me', adapter_set='MyAdaptor')
-    table_id = client.make_table(disp)
-    client.send_control([
-        make_add(table=table_id, id_='my_id', schema='my_schema')
-    ])
+    connect()
     while True:
         signal.pause()
 """
@@ -48,6 +52,15 @@ import time
 import urllib
 import urllib2
 import urlparse
+
+
+# Minimum time to wait between retry attempts, in seconds. Subsequent
+# reconnects repeatedly double this up to a maximum.
+RETRY_WAIT_SECS = 0.125
+
+# Maximum time in seconds between reconnects. Repeatedly failing connects will
+# cap the retry backoff at this maximum.
+RETRY_WAIT_MAX_SECS = 30.0
 
 
 # Create and activate a new table. The item group specified in the LS_id
@@ -133,10 +146,10 @@ EVENT_PUSH_ERROR = 'on_push_error'
 
 class Error(Exception):
     """Raised when any operation fails for objects in this module."""
-    def __init__(self, fmt, *args):
+    def __init__(self, fmt=None, *args):
         if args:
             fmt %= args
-        Exception.__init__(self, fmt)
+        Exception.__init__(self, fmt or self.__doc__)
 
 
 class TransientError(Error):
@@ -145,6 +158,10 @@ class TransientError(Error):
 
 class PermanentError(Error):
     """A request failed, and retrying it is futile."""
+
+
+class SessionExpired(PermanentError):
+    """Server indicated our session has expired."""
 
 
 def make_dict(pairs):
@@ -223,6 +240,16 @@ def _encode_op(dct, session_id):
     """Encode an op dict for sending to the server."""
     dct['LS_session'] = session_id
     return urllib.urlencode(dct)
+
+
+def _replace_url_host(url, hostname=None):
+    """Return the given URL with its host part replaced with `hostname` if it
+    is not None, otherwise simply return the original URL."""
+    if not hostname:
+        return url
+    parsed = urlparse.urlparse(url)
+    new = [parsed[0], hostname] + list(parsed[2:])
+    return urlparse.urlunparse(new)
 
 
 def _decode_field(s, prev=None):
@@ -388,6 +415,7 @@ class LsClient(object):
         main thread exits, otherwise the program will not exit until the client
         is explicitly shut down."""
         self.base_url = base_url
+        self._control_url = None
         self._workqueue = WorkQueue(daemon)
         self.dispatcher = dispatcher
         self.daemon = daemon
@@ -416,10 +444,10 @@ class LsClient(object):
             self.log.debug('New state: %r', state)
             self._dispatch(self.dispatcher, EVENT_STATE, state)
 
-    def _post(self, suffix, data):
+    def _post(self, suffix, data, base_url=None):
         """Perform an HTTP post to `suffix`, logging before and after. If an
         HTTP exception is thrown, log an error and return the exception."""
-        url = urlparse.urljoin(self.base_url, suffix)
+        url = urlparse.urljoin(base_url or self.base_url, suffix)
         self.log.debug('POST %r %r', url, data)
         req = urllib2.Request(url, data=data)
         try:
@@ -478,18 +506,14 @@ class LsClient(object):
         fp = self._post('bind_session.txt', urllib.urlencode(make_dict((
             ('LS_session', self._session['SessionId']),
             ('LS_content_length', self.content_length)
-        ))))
-        print 'parse raise'
+        ))), base_url=self._control_url)
         self._parse_and_raise_status(fp)
-        print 'parse sess'
         self._parse_session_info(fp)
-        print 'set state'
         self._set_state(STATE_CONNECTED)
         self.log.debug('Server reported Content-length: %s',
             fp.headers.get('Content-length'))
         try:
             for line in fp:
-                print 'line!', repr(line)
                 if not self._recv_line(line):
                     return True
         finally:
@@ -505,27 +529,28 @@ class LsClient(object):
         """Receive thread main function. Calls _do_recv() in a loop, optionally
         delaying if a transient error occurs."""
         self.log.debug('receive thread running.')
-        fail_ts = 0.0
+        fail_count = 0
         running = True
         while running:
             try:
                 running = self._do_recv()
-                fail_ts = 0.0
+                fail_count = 0
             except Exception, e:
-                if self._is_transient_error(e):
-                    fail_ts = fail_time or time.time()
-                    fail_wait = min(60, 2 ** int(time.time() - fail_ts))
-                    self.log.info('Error: %s: %s (reconnect in %.2fs)',
-                        e.__class__.__name__, e, fail_wait)
-                    self._set_state(STATE_CONNECTING)
-                    time.sleep(fail_wait)
-                else:
+                if not self._is_transient_error(e):
                     self.log.exception('_do_recv failure')
                     break
+                fail_wait = min(RETRY_WAIT_MAX_SECS,
+                    RETRY_WAIT_SECS * (2 ** fail_count))
+                fail_count += 1
+                self.log.info('Error: %s: %s (reconnect in %.2fs)',
+                    e.__class__.__name__, e, fail_wait)
+                self._set_state(STATE_CONNECTING)
+                time.sleep(fail_wait)
 
         self._set_state(STATE_DISCONNECTED)
         self._thread = None
         self._session.clear()
+        self._control_url = None
         self.log.info('Receive thread exiting')
 
     def join(self):
@@ -543,24 +568,19 @@ class LsClient(object):
         self._table_listener_map[self._table_id] = dispatcher
         return self._table_id
 
-    def _parse_and_raise_status(self, fp, fail_state=None):
+    def _parse_and_raise_status(self, fp):
         """Parse the status part of a control/session create/bind response.
         Either a single "OK", or "ERROR" followed by the error description. If
-        ERROR, raise RequestFailed. If `fail_state` is provided, emit an event
-        indicating the given state on failure.
+        ERROR, raise RequestFailed.
         """
         if fp.getcode() != 200:
-            if fail_state:
-                self._set_state(fail_state)
             raise TransientError('HTTP status %d', fp.getcode())
-        print 'here'
         more = lambda: fp.readline().rstrip('\r\n')
-        if not more().startswith('OK'):
-            print 'hah'
-            if fail_state:
-                self._set_state(fail_state)
-            raise TransientError('%s: %s' % (more(), more()))
-        print 'lol'
+        status = more()
+        if status.startswith('SYNC ERROR'):
+            raise SessionExpired()
+        if not status.startswith('OK'):
+            raise TransientError('%s %s: %s' % (word, more(), more()))
 
     def _parse_session_info(self, fp):
         """Parse the headers from `fp` sent immediately following an OK
@@ -570,6 +590,8 @@ class LsClient(object):
                 break
             bits = line.rstrip().split(':', 1)
             self._session[bits[0]] = bits[1]
+        self.control_url = _replace_url_host(self.base_url,
+            self._session.get('ControlAddress'))
         self.log.debug('Session: %r', self._session)
 
     def _create_session_impl(self, dct):
@@ -625,7 +647,8 @@ class LsClient(object):
             ops = [ops]
 
         bits = (_encode_op(op, self._session['SessionId']) for op in ops)
-        fp = self._post('control.txt', data='\r\n'.join(bits))
+        fp = self._post('control.txt', data='\r\n'.join(bits),
+            base_url=self._control_url)
         try:
             self._parse_and_raise_status(fp)
             self.log.debug('Control message successful.')
