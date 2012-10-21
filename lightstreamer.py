@@ -198,11 +198,11 @@ def _decode_field(s, prev=None):
 def run_and_log(func, *args, **kwargs):
     """Invoke a function, logging any raised exceptions. Returns False if an
     exception was raised."""
-        try:
-            func(*args, **kwargs)
-        except Exception:
-            LOG.exception('While invoking %r(*%r, **%r)', func, args, kwargs)
-            remove.append(func)
+    try:
+        func(*args, **kwargs)
+    except Exception:
+        LOG.exception('While invoking %r(*%r, **%r)', func, args, kwargs)
+        remove.append(func)
 
 
 def dispatch(lst, *args, **kwargs):
