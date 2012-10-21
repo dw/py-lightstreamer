@@ -19,7 +19,7 @@
 Example:
     def connect():
         client.create_session(username='me', adapter_set='MyAdaptor')
-        table = lightstreamer.Table(client, id_='my_id', schema='my_schema')
+        table = lightstreamer.Table(client, item_ids='my_id', schema='my_schema')
         table.on_update(on_update)
 
     def on_connection_state(state):
