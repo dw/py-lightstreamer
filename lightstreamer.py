@@ -41,6 +41,7 @@ Example:
 from __future__ import absolute_import
 
 import Queue
+import collections
 import logging
 import socket
 import threading
@@ -371,7 +372,7 @@ class LsClient(object):
         self._table_cb_map = {}
         self._session = {}
         self._state = STATE_DISCONNECTED
-        self._control_queue = []
+        self._control_queue = collections.deque()
         self._thread = None
         # Prevent enqueued control messages from being sent.
         self._uncorked = threading.Event()
@@ -391,7 +392,7 @@ class LsClient(object):
         self._state = state
         if state == STATE_DISCONNECTED:
             self._uncorked.clear()
-            self._control_queue = []
+            self._control_queue.clear()
         elif state == STATE_CONNECTED:
             self._uncorked.set()
 
@@ -535,7 +536,7 @@ class LsClient(object):
 
     def _parse_session_info(self, line_it):
         """Parse the headers from `fp` sent immediately following an OK
-        message, and store them in self.session."""
+        message, and store them in self._session."""
         # Requests' iter_lines() has some issues with \r.
         blanks = 0
         for line in line_it:
@@ -612,13 +613,20 @@ class LsClient(object):
             if self._state == STATE_DISCONNECTED:
                 return
 
+        limit = int(self._session.get('RequestLimit', '50000'))
+        bits = []
+        size = 0
         with self._lock:
-            queue = self._control_queue
-            self._control_queue = []
+            while self._control_queue:
+                op = self._control_queue[0]
+                op['LS_session'] = self._session['SessionId']
+                encoded = urllib.urlencode(op)
+                if (size + len(encoded) + 2) > limit:
+                    break
+                bits.append(encoded)
+                size += len(encoded) + 2
+                self._control_queue.popleft()
 
-        # TODO: maximum submit size.
-        id_ = self._session['SessionId']
-        bits = (urllib.urlencode(dict(op, LS_session=id_)) for op in queue)
         req = self._post('control.txt', data='\r\n'.join(bits),
             base_url=self._control_url)
         self._parse_and_raise_status(req, req.iter_lines())
