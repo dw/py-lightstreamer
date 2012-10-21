@@ -336,9 +336,8 @@ class LsClient(object):
         self._uncorked = threading.Event()
 
     def on_connection_state(self, func):
-        """Register `func` to be called when the connection state changes. Sole
-        argument, `state`. Sole argument, `state`, is # one of the STATE_*
-        constants."""
+        """Subscribe `func` to connection state changes. Sole argument, `state`
+        is one of the STATE_* constants."""
         self._state_funcs.append(func)
 
     def _set_state(self, state):
