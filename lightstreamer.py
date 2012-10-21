@@ -195,18 +195,22 @@ def _decode_field(s, prev=None):
     return s.decode('unicode_escape')
 
 
-def dispatch(lst, *args, **kwargs):
-    """Invoke every function in `lst` as func(*args, **kwargs), logging any
-    exceptions that are thrown."""
-    remove = []
-    for func in lst:
+def run_and_log(func, *args, **kwargs):
+    """Invoke a function, logging any raised exceptions. Returns False if an
+    exception was raised."""
         try:
             func(*args, **kwargs)
         except Exception:
             LOG.exception('While invoking %r(*%r, **%r)', func, args, kwargs)
             remove.append(func)
-    for func in remove:
-        lst.remove(func)
+
+
+def dispatch(lst, *args, **kwargs):
+    """Invoke every function in `lst` as func(*args, **kwargs), logging any
+    exceptions that are thrown."""
+    for func in list(lst):
+        if run_and_log(func, *args, **kwargs):
+            list.remove(func)
 
 
 class WorkQueue(object):
@@ -229,15 +233,6 @@ class WorkQueue(object):
         """Request the thread execute func(*args, **kwargs)."""
         self.queue.put((func, args, kwargs))
 
-    def _run_one(self, (func, args, kwargs)):
-        """Execute a function, logging and ignoring any exception that
-        occurs."""
-        try:
-            func(*args, **kwargs)
-        except Exception:
-            self.log.exception('While invoking %r(*%r, **%r)',
-                func, args, kwargs)
-
     def _main(self):
         """Thread main; sleep waiting for a function to dispatch."""
         while True:
@@ -245,7 +240,7 @@ class WorkQueue(object):
             if tup is None:
                 self.log.info('Got shutdown semaphore; exitting.')
                 return
-            self._run_one(tup)
+            run_and_log(*tup)
 
 
 class Table(object):
