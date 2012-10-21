@@ -1,19 +1,17 @@
 #
-# py-Lightstreamer
-# Copyright (C) 2012 David Wilson
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Affero General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Affero General Public License for more details.
-#
-# You should have received a copy of the GNU Affero General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# Copyright 2012, the py-lightstreamer authors
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#    http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 #
 
 """Quick'n'dirty Lightstreamer HTTP client.
@@ -42,6 +40,8 @@ Example:
     while True:
         signal.pause()
 """
+
+from __future__ import absolute_import
 
 import Queue
 import httplib
@@ -366,12 +366,12 @@ class Dispatcher(object):
 class WorkQueue(object):
     """Manage a thread and associated queue. The thread executes functions on
     the queue as requested."""
-    def __init__(self, daemon=True):
+    def __init__(self):
         """Create an instance."""
         self.log = logging.getLogger('WorkQueue')
         self.queue = Queue.Queue()
         self.thread = threading.Thread(target=self._main)
-        self.thread.setDaemon(daemon)
+        self.thread.setDaemon(True)
         self.thread.start()
 
     def stop(self):
@@ -402,6 +402,44 @@ class WorkQueue(object):
             self._run_one(tup)
 
 
+class Table(object):
+    """Lightstreamer table."""
+    def __init__(self, client, id_, mode, item_factory):
+        self.client = client
+        self.id_ = id_
+        self.mode = mode
+        self.item_factory = item_factory or (lambda o: o)
+        self.dispatcher = Dispatcher()
+        self._last_item_map = {}
+
+    def start(self):
+        self.client.send_control(make_op(OP_START, self.id_))
+
+    def delete(self):
+        self.client.send_control(make_op(OP_DELETE, self.id_))
+        self.client._forget_table(self.id_)
+
+    def listening(self, event):
+        """Like Dispatcher.listening()."""
+        return self.dispatcher.listening(event)
+
+    def listen(self, event, func):
+        """Like Dispatcher.listen()."""
+        self.dispatcher.listen(event, func)
+
+    def unlisten(self, event, func):
+        """Like Dispatcher.unlisten()."""
+        self.dispatcher.unlisten(event, func)
+
+    def _dispatch_update(self, item_id, item):
+        #if len(item) == 1 and 
+        last = dict(enumerate(self._last_item_map.get(item_id, [])))
+        fields = [_decode_field(s, last.get(i)) for i, s in enumerate(it)]
+        self._last_item_map[tup] = fields
+        self.dispatcher.dispatch(EVENT_UPDATE, item_id,
+            self.item_factory(fields))
+
+
 class LsClient(object):
     """Lightstreamer client.
 
@@ -409,32 +447,34 @@ class LsClient(object):
     responding to them using events raised through a Dispatcher instance; refer
     to comments around the various STATE_* constants.
     """
-    def __init__(self, base_url, dispatcher, daemon=True, content_length=None):
+    def __init__(self, base_url, content_length=None):
         """Create an instance using `base_url` as the root of the Lightstreamer
-        server. If `daemon` is True, the client shuts down when the program's
-        main thread exits, otherwise the program will not exit until the client
-        is explicitly shut down."""
+        server."""
         self.base_url = base_url
         self._control_url = None
-        self._workqueue = WorkQueue(daemon)
-        self.dispatcher = dispatcher
-        self.daemon = daemon
+        self._work_queue = WorkQueue()
+        self.dispatcher = Dispatcher()
         self.content_length = content_length
         self.log = logging.getLogger('LsClient')
         self._table_id = 0
-        # table_id -> ListenerBase instance.
-        self._table_listener_map = {}
-        # table_id, row_id -> ["last", "complete", "row"]
-        self._last_item_map = {}
+        self._table_map = {}
         self._session = {}
         self._state = STATE_DISCONNECTED
         self._thread = None
         self.opener = urllib2.build_opener(
             UnbufferedHTTPHandler, UnbufferedHTTPSHandler)
 
-    def _dispatch(self, dispatcher, *args):
-        """Convenience method to push an event dispatch on the work queue."""
-        self._workqueue.push(dispatcher.dispatch, *args)
+    def listening(self, event):
+        """Like Dispatcher.listening()."""
+        return self.dispatcher.listening(event)
+
+    def listen(self, event, func):
+        """Like Dispatcher.listen()."""
+        self.dispatcher.listen(event, func)
+
+    def unlisten(self, event, func):
+        """Like Dispatcher.unlisten()."""
+        self.dispatcher.unlisten(event, func)
 
     def _set_state(self, state):
         """Emit an event indicating the connection state has changed, taking
@@ -442,7 +482,7 @@ class LsClient(object):
         if self._state != state:
             self._state = state
             self.log.debug('New state: %r', state)
-            self._dispatch(self.dispatcher, EVENT_STATE, state)
+            self.dispatcher.dispatch(EVENT_STATE, state)
 
     def _post(self, suffix, data, base_url=None):
         """Perform an HTTP post to `suffix`, logging before and after. If an
@@ -458,7 +498,7 @@ class LsClient(object):
         finally:
             self.log.debug('POST %r complete.', url)
 
-    def _dispatch_update(self, line):
+    def _dispatch_table(self, line):
         """Parse an update event line from Lightstreamer, merging it into the
         previous version of the row it represents, then dispatch it to the
         table's associated listener."""
@@ -467,18 +507,16 @@ class LsClient(object):
             self.log.warning('Dropping strange update line: %r', line)
             return
 
-        it = iter(bits)
-        table_id, item_id = map(int, it.next().split(','))
-        dispatcher = self._table_listener_map.get(table_id)
-        if not dispatcher:
+        table_id, item_id = map(int, bits[0].split(','))
+        table = self._table_map.get(table_id)
+        if not table:
             self.log.warning('Table %r not in map; dropping row', table_id)
             return
 
-        tup = (table_id, item_id)
-        last_map = dict(enumerate(self._last_item_map.get(tup, [])))
-        fields = [_decode_field(s, last_map.get(i)) for i, s in enumerate(it)]
-        self._last_item_map[tup] = fields
-        self._dispatch(dispatcher, EVENT_UPDATE, table_id, item_id, fields)
+        table._dispatch_update(item_id, bits[1:])
+
+    def _forget_table(self, id_):
+        self._table_map.pop(id_, None)
 
     def _recv_line(self, line):
         """Parse a line from Lightstreamer and act accordingly. Returns True to
@@ -558,15 +596,27 @@ class LsClient(object):
         if self._thread:
             self._thread.join()
 
-    def make_table(self, dispatcher=None):
-        """Allocate a table ID and associate it with the given `listener`. The
+    def cork(self):
+        pass
+
+    def uncork(self):
+        pass
+
+    def table(self, mode, item_ids, schema=None, data_adapter=None,
+            item_factory=None, buffer_size=None, max_frequency=None,
+            snapshot=None, silent=False):
+        """Create a Table ID and associate it with the given `listener`. The
         new table ID is returned. If `dispatcher` is given, use it instead of
         the session's Dispatcher instance to dispatch update events for this
         table."""
         self._table_id += 1
-        dispatcher = dispatcher or self.dispatcher
-        self._table_listener_map[self._table_id] = dispatcher
-        return self._table_id
+        table = Table(client, self._table_id, mode, item_factory)
+        self._table_map[table.id_] = table
+        self.send_control(make_op(OP_ADD_SILENT if silent else OP_ADD,
+            item_ids=item_ids, schema=schema, mode=mode,
+            buffer_size=buffer_size, max_frequency=max_frequency,
+            snapshot=snapshot))
+        return table
 
     def _parse_and_raise_status(self, fp):
         """Parse the status part of a control/session create/bind response.
@@ -606,7 +656,7 @@ class LsClient(object):
             raise
         self._parse_session_info(fp)
         self._thread = threading.Thread(target=self._recv_main)
-        self._thread.setDaemon(self.daemon)
+        self._thread.setDaemon(True)
         self._thread.start()
 
     def create_session(self, username, adapter_set, password=None,
@@ -628,7 +678,7 @@ class LsClient(object):
         """
         assert self._state == STATE_DISCONNECTED,\
             "create_session() called while state %r" % self._state
-        self._workqueue.push(self._create_session_impl, make_dict((
+        self._work_queue.push(self._create_session_impl, make_dict((
             ('LS_user', username),
             ('LS_adapter_set', adapter_set),
             ('LS_report_info', 'true'),
@@ -658,4 +708,4 @@ class LsClient(object):
     def send_control(self, ops):
         """Send one or more control messages to the server. `ops` is either a
         single dict returned by `make_op()`, or a list of dicts."""
-        self._workqueue.push(self._send_control_impl, ops)
+        self._work_queue.push(self._send_control_impl, ops)
