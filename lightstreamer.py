@@ -84,6 +84,10 @@ OP_START = 'start'
 # immediately.
 OP_DELETE = 'delete'
 
+# Session management; forcing closure of an existing session.
+OP_DESTROY = 'destroy'
+
+
 # All the itemEvent coming from the Data Adapter must be sent to the client
 # unchanged.
 MODE_RAW = 'RAW'
@@ -157,53 +161,6 @@ def make_dict(pairs):
     """Make a dict out of the given key/value pairs, but only include values
     that are not None."""
     return dict((k, v) for k, v in pairs if v is not None)
-
-
-def make_op(op, table_id, data_adapter=None, item_ids=None, schema=None,
-        selector=None, mode=None, buffer_size=None, max_frequency=None,
-        snapshot=None):
-    """Return a dict describing a control channel operation. The dict should be
-    passed to `LsClient.send_control()`.
-
-    `op` is the OP_* constant describing the operation.
-    `table_id` is the ID of the table to which the operation applies.
-    `data_adapter` is the optional data adapter name.
-    `item_ids` is the ID of the item group that the table contains.
-    `schema` is the ID of the schema table items should conform to.
-    `selector` is the optional ID of a selector for table items.
-    `mode` is the MODE_* constant describing the subscription mode.
-    `buffer_size` is the requested size of the transmit queue measured in
-        events; defaults to 1 for MODE_MERGE and MODE_DISTINCT. Set to 0 to
-        indicate 'maximum possible size'.
-    `max_frequency` is the requested maximum updates per second for table
-        items; set to "unfiltered" to forward all messages without loss (only
-        valid for MODE_MERGE, MODE_DISTINCT, MODE_COMMAND), set to 0 for "no
-        frequency limit", or deicmal number of updates per second. 
-    `snapshot` indicates whether server should send a snapshot at subscription
-        time. False for no, True for yes, or integer >= 1 for 'yes, but only
-        send N items.
-    """
-    assert op in (OP_ADD, OP_ADD_SILENT, OP_START, OP_DELETE)
-    assert mode in (None, MODE_RAW, MODE_MERGE, MODE_DISTINCT, MODE_COMMAND)
-
-    if op in (OP_ADD, OP_ADD_SILENT):
-        if not item_ids:
-            raise ValueError('item_ids must be specified for ADD/ADD_SILENT')
-        if not mode:
-            raise ValueError('mode must be specified for ADD/ADD_SILENT')
-
-    return make_dict((
-        ('LS_table', table_id),
-        ('LS_op', op),
-        ('LS_data_adapter', data_adapter),
-        ('LS_id', item_ids),
-        ('LS_schema', schema),
-        ('LS_selector', selector),
-        ('LS_mode', mode),
-        ('LS_requested_buffer_size', buffer_size),
-        ('LS_requested_max_frequency', max_frequency),
-        ('LS_snapshot', snapshot and 'true')
-    ))
 
 
 def _replace_url_host(url, hostname=None):
@@ -296,8 +253,8 @@ class Table(object):
     def __init__(self, client, item_ids, mode=None, data_adapter=None,
             buffer_size=None, row_factory=None, max_frequency=None,
             schema=None, selector=None, silent=False, snapshot=True):
-        """Create a new table. See make_op() for descriptions of most
-        parameters, except:
+        """Create a new table. See LsClient.send_control() for descriptions of
+        most parameters, except:
 
             silent: If True, server won't start delivering events until
                 start() is called.
@@ -311,12 +268,18 @@ class Table(object):
         self._last_item_map = {}
         self._callback_map = {}
 
-        client.send_control(make_op(OP_ADD_SILENT if silent else OP_ADD,
-            self.table_id,
+        client.send_control(
+            op=OP_ADD_SILENT if silent else OP_ADD,
             buffer_size=buffer_size,
-            item_ids=item_ids, schema=schema, mode=mode,
+            data_adapter=data_adapter,
+            item_ids=item_ids,
             max_frequency=max_frequency,
-            snapshot=snapshot))
+            mode=mode or MODE_MERGE,
+            schema=schema,
+            selector=selector,
+            snapshot=snapshot,
+            table_id=self.table_id
+        )
 
     def on_update(self, func):
         """Subscribe `func` to be called when the client receives a new update
@@ -332,11 +295,11 @@ class Table(object):
     def start(self):
         """If the table was created with silent=True, instruct the server to
         start delivering updates."""
-        self.client.send_control(make_op(OP_START, self.table_id))
+        self.client.send_control(OP_START, self.table_id)
 
     def delete(self):
         """Instruct the server and LsClient to discard this table."""
-        self.client.send_control(make_op(OP_DELETE, self.table_id))
+        self.client.send_control(OP_DELETE, self.table_id)
         self.client._forget_table(self.table_id)
 
     def _dispatch_update(self, item_id, item):
@@ -632,8 +595,46 @@ class LsClient(object):
         self._parse_and_raise_status(req, req.iter_lines())
         self.log.debug('Control message successful.')
 
-    def send_control(self, op):
-        """Enqueue a control message for sending to the server."""
+    def send_control(op, table_id, data_adapter=None, item_ids=None,
+            schema=None, selector=None, mode=None, buffer_size=None,
+            max_frequency=None, snapshot=None):
+        """Enqueue a control message for sending to the server.
+
+        `op` is the OP_* constant describing the operation.
+        `table_id` is the ID of the table to which the operation applies.
+        `data_adapter` is the optional data adapter name.
+        `item_ids` is the ID of the item group that the table contains.
+        `schema` is the ID of the schema table items should conform to.
+        `selector` is the optional ID of a selector for table items.
+        `mode` is the MODE_* constant describing the subscription mode.
+        `buffer_size` is the requested size of the transmit queue measured in
+            events; defaults to 1 for MODE_MERGE and MODE_DISTINCT. Set to 0 to
+            indicate 'maximum possible size'.
+        `max_frequency` is the requested maximum updates per second for table
+            items; set to "unfiltered" to forward all messages without loss
+            (only valid for MODE_MERGE, MODE_DISTINCT, MODE_COMMAND), set to 0
+            for "no frequency limit", or integer number of updates per second. 
+        `snapshot` indicates whether server should send a snapshot at
+            subscription time. False for no, True for yes, or integer >= 1 for
+            'yes, but only send N items.
+        """
+        assert op in (OP_ADD, OP_ADD_SILENT, OP_START, OP_DELETE)
+        assert mode in (None, MODE_RAW, MODE_MERGE, MODE_DISTINCT, MODE_COMMAND)
+        if op in (OP_ADD, OP_ADD_SILENT):
+            assert item_ids, 'item_ids required for ADD/ADD_SILENT'
+            assert mode, 'mode required for ADD/ADD_SILENT'
+
         with self._lock:
-            self._control_queue.append(op)
+            self._control_queue.append(make_dict(
+                ('LS_table', table_id),
+                ('LS_op', op),
+                ('LS_data_adapter', data_adapter),
+                ('LS_id', item_ids),
+                ('LS_schema', schema),
+                ('LS_selector', selector),
+                ('LS_mode', mode),
+                ('LS_requested_buffer_size', buffer_size),
+                ('LS_requested_max_frequency', max_frequency),
+                ('LS_snapshot', snapshot and 'true')
+            ))
         self._work_queue.push(self._send_control_impl)
