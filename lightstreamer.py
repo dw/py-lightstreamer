@@ -137,6 +137,14 @@ EVENT_OVERFLOW = 'on_overflow'
 EVENT_PUSH_ERROR = 'on_push_error'
 
 
+CAUSE_MAP = {
+    '31': 'closed by the administrator through a "destroy" request',
+    '32': 'closed by the administrator through JMX',
+    '35': 'Adapter does not allow more than one session for the user',
+    '40': 'A manual rebind to the same session has been performed'
+}
+
+
 class Error(Exception):
     """Raised when any operation fails for objects in this module."""
     def __init__(self, fmt=None, *args):
@@ -149,11 +157,7 @@ class TransientError(Error):
     """A request failed, but a later retry may succeed (e.g. network error)."""
 
 
-class PermanentError(Error):
-    """A request failed, and retrying it is futile."""
-
-
-class SessionExpired(PermanentError):
+class SessionExpired(Error):
     """Server indicated our session has expired."""
 
 
@@ -203,7 +207,6 @@ def run_and_log(func, *args, **kwargs):
         return True
     except Exception:
         LOG.exception('While invoking %r(*%r, **%r)', func, args, kwargs)
-        remove.append(func)
 
 
 def dispatch(lst, *args, **kwargs):
@@ -211,7 +214,7 @@ def dispatch(lst, *args, **kwargs):
     exceptions that are thrown."""
     for func in list(lst):
         if run_and_log(func, *args, **kwargs):
-            list.remove(func)
+            lst.remove(func)
 
 
 class WorkQueue(object):
@@ -241,7 +244,8 @@ class WorkQueue(object):
             if tup is None:
                 self.log.info('Got shutdown semaphore; exitting.')
                 return
-            run_and_log(*tup)
+            func, args, kwargs = tup
+            run_and_log(func, *args, **kwargs)
 
 
 class Table(object):
@@ -390,23 +394,27 @@ class LsClient(object):
         else:
             func(item_id, bits[1:])
 
+    # Constants for _recv_line -> _do_recv communication.
+    R_OK, R_RECONNECT, R_END = range(3)
+
     def _recv_line(self, line):
         """Parse a line from Lightstreamer and act accordingly. Returns True to
         keep the connection alive, False to indicate time to reconnect, or
         raises Terminated to indicate the server doesn't like us any more."""
         if line.startswith('PROBE'):
             self.log.debug('Received server probe.')
-            return True
+            return self.R_OK
         elif line.startswith('LOOP'):
             self.log.debug('Server indicated length exceeded; reconnecting.')
-            return False
+            return self.R_RECONNECT
         elif line.startswith('END'):
-            self.log.error('Server permanently closed our session! %r', line)
-            raise PermanentError('Session closed permanently by server.')
+            cause = CAUSE_MAP.get(line.split()[-1], line)
+            self.log.info('Session permanently closed; cause: %r', cause)
+            return self.R_END
         else:
             # Update event.
             self._dispatch_update(line)
-            return True
+            return self.R_OK
 
     def _do_recv(self):
         """Connect to bind_session.txt and dispatch messages until the server
@@ -424,7 +432,10 @@ class LsClient(object):
         self.log.debug('Server reported Content-length: %s',
             req.headers.get('Content-length'))
         for line in line_it:
-            if not self._recv_line(line):
+            status = self._recv_line(line)
+            if status == self.R_END:
+                return False
+            elif status == self.R_RECONNECT:
                 return True
 
     def _is_transient_error(self, e):
