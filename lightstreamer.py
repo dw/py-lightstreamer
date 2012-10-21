@@ -466,11 +466,6 @@ class LsClient(object):
         self._control_url = None
         self.log.info('Receive thread exiting')
 
-    def join(self):
-        """Wait for the receive thread to terminate."""
-        if self._thread:
-            self._thread.join()
-
     def allocate(self, func):
         """Allocate a table identifier and set `func` as its update callback.
         Returns the new identifier."""
@@ -563,6 +558,15 @@ class LsClient(object):
             ('LS_keepalive_millis', keepalive_ms)
         )))
 
+    def destroy(self):
+        """Request the server destroy our session."""
+        self.send_control(OP_DESTROY, 0)
+
+    def join(self):
+        """Wait for the receive thread to terminate."""
+        if self._thread:
+            self._thread.join()
+
     def _send_control_impl(self):
         """Worker function for send_control()."""
         assert self._session['SessionId']
@@ -595,7 +599,7 @@ class LsClient(object):
         self._parse_and_raise_status(req, req.iter_lines())
         self.log.debug('Control message successful.')
 
-    def send_control(op, table_id, data_adapter=None, item_ids=None,
+    def send_control(self, op, table_id, data_adapter=None, item_ids=None,
             schema=None, selector=None, mode=None, buffer_size=None,
             max_frequency=None, snapshot=None):
         """Enqueue a control message for sending to the server.
@@ -618,14 +622,14 @@ class LsClient(object):
             subscription time. False for no, True for yes, or integer >= 1 for
             'yes, but only send N items.
         """
-        assert op in (OP_ADD, OP_ADD_SILENT, OP_START, OP_DELETE)
+        assert op in (OP_ADD, OP_ADD_SILENT, OP_START, OP_DELETE, OP_DESTROY)
         assert mode in (None, MODE_RAW, MODE_MERGE, MODE_DISTINCT, MODE_COMMAND)
         if op in (OP_ADD, OP_ADD_SILENT):
             assert item_ids, 'item_ids required for ADD/ADD_SILENT'
             assert mode, 'mode required for ADD/ADD_SILENT'
 
         with self._lock:
-            self._control_queue.append(make_dict(
+            self._control_queue.append(make_dict((
                 ('LS_table', table_id),
                 ('LS_op', op),
                 ('LS_data_adapter', data_adapter),
@@ -636,5 +640,5 @@ class LsClient(object):
                 ('LS_requested_buffer_size', buffer_size),
                 ('LS_requested_max_frequency', max_frequency),
                 ('LS_snapshot', snapshot and 'true')
-            ))
+            )))
         self._work_queue.push(self._send_control_impl)
