@@ -17,25 +17,22 @@
 """Quick'n'dirty Lightstreamer HTTP client.
 
 Example:
+    def connect():
+        client.create_session(username='me', adapter_set='MyAdaptor')
+        table = lightstreamer.Table(client, id_='my_id', schema='my_schema')
+        table.on_update(on_update)
+
     def on_connection_state(state):
         print 'CONNECTION STATE:', state
         if state == lightstreamer.STATE_DISCONNECTED:
             connect()
 
-    def on_update(table_id, item_id, data):
+    def on_update(item_id, data):
         print 'UPDATE!', data
 
-    def connect():
-        client.create_session(username='me', adapter_set='MyAdaptor')
-        table_id = client.make_table(disp)
-        client.send_control([
-            make_add(table=table_id, id_='my_id', schema='my_schema')
-        ])
+    client = lightstreamer.LsClient('http://www.example.com/')
+    client.on_connection_state(on_connection_state)
 
-    disp = lightstreamer.Dispatcher()
-    disp.listen(lightstreamer.EVENT_STATE, on_connection_state)
-    disp.listen(lightstreamer.EVENT_UPDATE, on_update)
-    client = lightstreamer.LsClient('http://www.example.com/', disp)
     connect()
     while True:
         signal.pause()
@@ -44,7 +41,6 @@ Example:
 from __future__ import absolute_import
 
 import Queue
-import httplib
 import logging
 import socket
 import threading
@@ -52,6 +48,11 @@ import time
 import urllib
 import urllib2
 import urlparse
+
+import requests
+
+
+LOG = logging.getLogger('lightstreamer')
 
 
 # Minimum time to wait between retry attempts, in seconds. Subsequent
@@ -61,7 +62,6 @@ RETRY_WAIT_SECS = 0.125
 # Maximum time in seconds between reconnects. Repeatedly failing connects will
 # cap the retry backoff at this maximum.
 RETRY_WAIT_MAX_SECS = 30.0
-
 
 # Create and activate a new table. The item group specified in the LS_id
 # parameter will be subscribed to and Lightstreamer Server will start sending
@@ -125,18 +125,6 @@ STATE_RECONNECTING = 'reconnecting'
 # default state.
 STATE_DISCONNECTED = 'disconnected'
 
-# Called when the receive connection state changes. Sole argument, `state`, is
-# one of the STATE_* constants.
-EVENT_STATE = 'on_connection_state'
-
-# Fired when the client receives a new update message (i.e. data). Receives 3
-# arguments: table_id, item_id, and msg.
-EVENT_UPDATE = 'on_update'
-
-# Called when the server indicates the first set of update messages
-# representing a snapshot have been sent successfully.
-EVENT_END_OF_SNAPSHOT = 'on_end_of_snapshot'
-
 # Called when the server indicates its internal message queue overflowed.
 EVENT_OVERFLOW = 'on_overflow'
 
@@ -170,15 +158,16 @@ def make_dict(pairs):
     return dict((k, v) for k, v in pairs if v is not None)
 
 
-def make_op(op, table, data_adapter=None, id_=None, schema=None, selector=None,
-        mode=None, buffer_size=None, max_frequency=None, snapshot=None):
+def make_op(op, table_id, data_adapter=None, item_ids=None, schema=None,
+        selector=None, mode=None, buffer_size=None, max_frequency=None,
+        snapshot=None):
     """Return a dict describing a control channel operation. The dict should be
     passed to `LsClient.send_control()`.
 
     `op` is the OP_* constant describing the operation.
-    `table` is the ID of the table to which the operation applies.
+    `table_id` is the ID of the table to which the operation applies.
     `data_adapter` is the optional data adapter name.
-    `id_` is the ID of the item group that the table contains.
+    `item_ids` is the ID of the item group that the table contains.
     `schema` is the ID of the schema table items should conform to.
     `selector` is the optional ID of a selector for table items.
     `mode` is the MODE_* constant describing the subscription mode.
@@ -197,16 +186,16 @@ def make_op(op, table, data_adapter=None, id_=None, schema=None, selector=None,
     assert mode in (None, MODE_RAW, MODE_MERGE, MODE_DISTINCT, MODE_COMMAND)
 
     if op in (OP_ADD, OP_ADD_SILENT):
-        if not id_:
-            raise ValueError('id_ must be specified for ADD/ADD_SILENT')
+        if not item_ids:
+            raise ValueError('item_ids must be specified for ADD/ADD_SILENT')
         if not mode:
             raise ValueError('mode must be specified for ADD/ADD_SILENT')
 
     return make_dict((
-        ('LS_table', table),
+        ('LS_table', table_id),
         ('LS_op', op),
         ('LS_data_adapter', data_adapter),
-        ('LS_id', id_),
+        ('LS_id', item_ids),
         ('LS_schema', schema),
         ('LS_selector', selector),
         ('LS_mode', mode),
@@ -214,32 +203,6 @@ def make_op(op, table, data_adapter=None, id_=None, schema=None, selector=None,
         ('LS_requested_max_frequency', max_frequency),
         ('LS_snapshot', snapshot and 'true')
     ))
-
-
-def make_add(*args, **kwargs):
-    """Like `make_op()`, but assumed operation is OP_ADD."""
-    return make_op(OP_ADD, *args, **kwargs)
-
-
-def make_add_silent(*args, **kwargs):
-    """Like `make_op()`, but assumed operation is OP_ADD_SILENT."""
-    return make_op(OP_ADD_SILENT, *args, **kwargs)
-
-
-def make_start(*args, **kwargs):
-    """Like `make_op()`, but assumed operation is OP_START."""
-    return make_op(OP_START, *args, **kwargs)
-
-
-def make_delete(*args, **kwargs):
-    """Like `make_op()`, but assumed operation is OP_DELETE."""
-    return make_op(OP_DELETE, *args, **kwargs)
-
-
-def _encode_op(dct, session_id):
-    """Encode an op dict for sending to the server."""
-    dct['LS_session'] = session_id
-    return urllib.urlencode(dct)
 
 
 def _replace_url_host(url, hostname=None):
@@ -274,93 +237,18 @@ def _decode_field(s, prev=None):
     return s.decode('unicode_escape')
 
 
-class UnbufferedHTTPConnection(httplib.HTTPConnection):
-    """Python >= 2.6 made block buffering default in urllib2. Unfortunately
-    this breaks .readline() on a streamy HTTP response. This class forces it
-    off."""
-    def getresponse(self, buffering=False):
+def dispatch(lst, *args, **kwargs):
+    """Invoke every function in `lst` as func(*args, **kwargs), logging any
+    exceptions that are thrown."""
+    remove = []
+    for func in lst:
         try:
-            return httplib.HTTPConnection.getresponse(self, False)
-        except:
-            # Python <= 2.5 compatibility.
-            return httplib.HTTPConnection.getresponse(self)
-
-
-class UnbufferedHTTPHandler(urllib2.HTTPHandler):
-    """Like UnbufferedHTTPConnection."""
-    def http_open(self, req):
-        socket._fileobject.default_bufsize = 1
-        try:
-            return self.do_open(UnbufferedHTTPConnection, req)
-        finally:
-            socket._fileobject.default_bufsize = 8192
-
-
-class UnbufferedHTTPSConnection(httplib.HTTPSConnection):
-    """Like UnbufferedHTTPConnection."""
-    def getresponse(self, buffering=False):
-        try:
-            return httplib.HTTPSConnection.getresponse(self, False)
-        except:
-            # Python <= 2.5 compatibility.
-            return httplib.HTTPSConnection.getresponse(self)
-
-
-class UnbufferedHTTPSHandler(urllib2.HTTPSHandler):
-    """Like UnbufferedHTTPConnection."""
-    def https_open(self, req):
-        socket._fileobject.default_bufsize = 1
-        try:
-            return self.do_open(UnbufferedHTTPSConnection, req)
-        finally:
-            socket._fileobject.default_bufsize = 8192
-
-
-class Dispatcher(object):
-    """Base implementation for listener classes. Dispatches messages in the
-    client receive loop thread. Note long running callbacks may result in
-    server-side overflows and therefore dropped messages.
-    """
-    def __init__(self):
-        """Create an instance."""
-        self.log = logging.getLogger(self.__class__.__name__)
-        # name -> [list, of, listener, funcs]
-        self._event_map = {}
-
-    def listening(self, event):
-        """Return a count of subscribers to `event`."""
-        return len(self._event_map.get(event, []))
-
-    def listen(self, event, func):
-        """Subscribe `func` to be called when `event` is dispatched. The
-        function will be called with the arguments documented for `event`."""
-        listeners = self._event_map.setdefault(event, [])
-        if func in listeners:
-            self.log.warning('%r already subscribed to %r', func, event)
-        else:
-            listeners.append(func)
-
-    def unlisten(self, event, func):
-        """Unsubscribe `func` from `event`."""
-        listeners = self._event_map.get(event, [])
-        try:
-            listeners.remove(func)
-        except ValueError:
-            self.log.warning('%r was not subscribed to %r', func, event)
-
-    def dispatch(self, event, *args, **kwargs):
-        """Decide how to dispatch `method(*args, **kwargs)`. By default, we
-        simply call it immediately."""
-        listeners = self._event_map.get(event)
-        if not listeners:
-            self.log.debug('got %r but nobody is listening for that', event)
-            return
-        for listener in listeners:
-            try:
-                listener(*args, **kwargs)
-            except Exception:
-                self.log.exception('While invoking %r(*%r, **%r)',
-                    event, args, kwargs)
+            func(*args, **kwargs)
+        except Exception:
+            LOG.exception('While invoking %r(*%r, **%r)', func, args, kwargs)
+            remove.append(func)
+    for func in remove:
+        lst.remove(func)
 
 
 class WorkQueue(object):
@@ -404,40 +292,62 @@ class WorkQueue(object):
 
 class Table(object):
     """Lightstreamer table."""
-    def __init__(self, client, id_, mode, item_factory):
+    def __init__(self, client, item_ids, mode=None, data_adapter=None,
+            buffer_size=None, row_factory=None, max_frequency=None,
+            schema=None, selector=None, silent=False, snapshot=True):
+        """Create a new table. See make_op() for descriptions of most
+        parameters, except:
+
+            silent: If True, server won't start delivering events until
+                start() is called.
+            row_factory: Passed a sequence of strings-or-None for each row
+                received, expected to return some object representing the row.
+                Defaults to tuple().
+        """
         self.client = client
-        self.id_ = id_
-        self.mode = mode
-        self.item_factory = item_factory or (lambda o: o)
-        self.dispatcher = Dispatcher()
+        self.table_id = client.allocate(self._dispatch_update)
+        self.row_factory = row_factory or tuple
         self._last_item_map = {}
+        self._callback_map = {}
+
+        client.send_control(make_op(OP_ADD_SILENT if silent else OP_ADD,
+            self.table_id,
+            buffer_size=buffer_size,
+            item_ids=item_ids, schema=schema, mode=mode,
+            max_frequency=max_frequency,
+            snapshot=snapshot))
+
+    def on_update(self, func):
+        """Subscribe `func` to be called when the client receives a new update
+        message (i.e. data). Receives 2 arguments: item_id, and msg."""
+        self._callback_map.setdefault('update', []).append(func)
+
+    def on_end_of_snapshot(self, func):
+        """Subscribe `func` to be called when the server indicates the first
+        set of update messages representing a snapshot have been sent
+        successfully."""
+        self._callback_map.setdefault('end_of_snapshot', []).append(func)
 
     def start(self):
-        self.client.send_control(make_op(OP_START, self.id_))
+        """If the table was created with silent=True, instruct the server to
+        start delivering updates."""
+        self.client.send_control(make_op(OP_START, self.table_id))
 
     def delete(self):
-        self.client.send_control(make_op(OP_DELETE, self.id_))
-        self.client._forget_table(self.id_)
-
-    def listening(self, event):
-        """Like Dispatcher.listening()."""
-        return self.dispatcher.listening(event)
-
-    def listen(self, event, func):
-        """Like Dispatcher.listen()."""
-        self.dispatcher.listen(event, func)
-
-    def unlisten(self, event, func):
-        """Like Dispatcher.unlisten()."""
-        self.dispatcher.unlisten(event, func)
+        """Instruct the server and LsClient to discard this table."""
+        self.client.send_control(make_op(OP_DELETE, self.table_id))
+        self.client._forget_table(self.table_id)
 
     def _dispatch_update(self, item_id, item):
-        #if len(item) == 1 and 
+        """Called by LsClient to dispatch a table update line."""
+        if item == 'EOS':
+            dispatch(self._callback_map.get('end_of_snapshot', []))
+            return
         last = dict(enumerate(self._last_item_map.get(item_id, [])))
-        fields = [_decode_field(s, last.get(i)) for i, s in enumerate(it)]
-        self._last_item_map[tup] = fields
-        self.dispatcher.dispatch(EVENT_UPDATE, item_id,
-            self.item_factory(fields))
+        fields = [_decode_field(s, last.get(i)) for i, s in enumerate(item)]
+        self._last_item_map[item_id] = fields
+        dispatch(self._callback_map.get('update', []), item_id,
+            self.row_factory(fields))
 
 
 class LsClient(object):
@@ -447,76 +357,79 @@ class LsClient(object):
     responding to them using events raised through a Dispatcher instance; refer
     to comments around the various STATE_* constants.
     """
-    def __init__(self, base_url, content_length=None):
+    def __init__(self, base_url, work_queue=None, content_length=None):
         """Create an instance using `base_url` as the root of the Lightstreamer
         server."""
         self.base_url = base_url
+        self._lock = threading.Lock()
         self._control_url = None
-        self._work_queue = WorkQueue()
-        self.dispatcher = Dispatcher()
+        self._work_queue = work_queue or WorkQueue()
         self.content_length = content_length
-        self.log = logging.getLogger('LsClient')
+        self.log = logging.getLogger('lightstreamer.LsClient')
+        self._state_funcs = []
         self._table_id = 0
-        self._table_map = {}
+        self._table_cb_map = {}
         self._session = {}
         self._state = STATE_DISCONNECTED
+        self._control_queue = []
         self._thread = None
-        self.opener = urllib2.build_opener(
-            UnbufferedHTTPHandler, UnbufferedHTTPSHandler)
+        # Prevent enqueued control messages from being sent.
+        self._uncorked = threading.Event()
 
-    def listening(self, event):
-        """Like Dispatcher.listening()."""
-        return self.dispatcher.listening(event)
-
-    def listen(self, event, func):
-        """Like Dispatcher.listen()."""
-        self.dispatcher.listen(event, func)
-
-    def unlisten(self, event, func):
-        """Like Dispatcher.unlisten()."""
-        self.dispatcher.unlisten(event, func)
+    def on_connection_state(self, func):
+        """Register `func` to be called when the connection state changes. Sole
+        argument, `state`. Sole argument, `state`, is # one of the STATE_*
+        constants."""
+        self._state_funcs.append(func)
 
     def _set_state(self, state):
         """Emit an event indicating the connection state has changed, taking
         care not to emit duplicate events."""
-        if self._state != state:
-            self._state = state
-            self.log.debug('New state: %r', state)
-            self.dispatcher.dispatch(EVENT_STATE, state)
+        if self._state == state:
+            return
+
+        self._state = state
+        if state == STATE_DISCONNECTED:
+            self._uncorked.clear()
+            self._control_queue = []
+        elif state == STATE_CONNECTED:
+            self._uncorked.set()
+
+        self.log.debug('New state: %r', state)
+        dispatch(self._state_funcs, state)
 
     def _post(self, suffix, data, base_url=None):
         """Perform an HTTP post to `suffix`, logging before and after. If an
         HTTP exception is thrown, log an error and return the exception."""
         url = urlparse.urljoin(base_url or self.base_url, suffix)
-        self.log.debug('POST %r %r', url, data)
-        req = urllib2.Request(url, data=data)
         try:
-            return self.opener.open(req)
+            return requests.post(url, data=data, prefetch=False)
         except urllib2.HTTPError, e:
             self.log.error('HTTP %d for %r', e.getcode(), url)
             return e
-        finally:
-            self.log.debug('POST %r complete.', url)
 
-    def _dispatch_table(self, line):
+    def _dispatch_update(self, line):
         """Parse an update event line from Lightstreamer, merging it into the
         previous version of the row it represents, then dispatch it to the
         table's associated listener."""
+        if not line:
+            return
         bits = line.rstrip('\r\n').split('|')
-        if len(bits) < 2 or bits[0].count(',') != 1:
+        if bits[0].count(',') < 1:
             self.log.warning('Dropping strange update line: %r', line)
             return
 
-        table_id, item_id = map(int, bits[0].split(','))
-        table = self._table_map.get(table_id)
-        if not table:
-            self.log.warning('Table %r not in map; dropping row', table_id)
+        table_info = bits[0].split(',')
+        table_id, item_id = map(int, table_info[:2])
+        func = self._table_cb_map.get(table_id)
+        if not func:
+            self.log.warning('Unknown table %r; dropping row', table_id)
             return
 
-        table._dispatch_update(item_id, bits[1:])
-
-    def _forget_table(self, id_):
-        self._table_map.pop(id_, None)
+        if table_info[-1] == 'EOS':
+            func(item_id, 'EOS')
+        else:
+            func(item_id, bits[1:])
 
     def _recv_line(self, line):
         """Parse a line from Lightstreamer and act accordingly. Returns True to
@@ -541,21 +454,19 @@ class LsClient(object):
         tells us to stop or an error occurs."""
         self.log.debug('Attempting to connect..')
         self._set_state(STATE_CONNECTING)
-        fp = self._post('bind_session.txt', urllib.urlencode(make_dict((
+        req = self._post('bind_session.txt', urllib.urlencode(make_dict((
             ('LS_session', self._session['SessionId']),
             ('LS_content_length', self.content_length)
         ))), base_url=self._control_url)
-        self._parse_and_raise_status(fp)
-        self._parse_session_info(fp)
+        line_it = req.iter_lines(chunk_size=1)
+        self._parse_and_raise_status(req, line_it)
+        self._parse_session_info(line_it)
         self._set_state(STATE_CONNECTED)
         self.log.debug('Server reported Content-length: %s',
-            fp.headers.get('Content-length'))
-        try:
-            for line in fp:
-                if not self._recv_line(line):
-                    return True
-        finally:
-            fp.close()
+            req.headers.get('Content-length'))
+        for line in line_it:
+            if not self._recv_line(line):
+                return True
 
     def _is_transient_error(self, e):
         if isinstance(e, urllib2.URLError) \
@@ -596,65 +507,63 @@ class LsClient(object):
         if self._thread:
             self._thread.join()
 
-    def cork(self):
-        pass
+    def allocate(self, func):
+        """Allocate a table identifier and set `func` as its update callback.
+        Returns the new identifier."""
+        with self._lock:
+            self._table_id += 1
+            self._table_cb_map[self._table_id] = func
+            return self._table_id
 
-    def uncork(self):
-        pass
+    def deallocate(self, table_id):
+        """Discard state relating to the given table ID."""
+        self._table_cb_map.pop(table_id, None)
 
-    def table(self, mode, item_ids, schema=None, data_adapter=None,
-            item_factory=None, buffer_size=None, max_frequency=None,
-            snapshot=None, silent=False):
-        """Create a Table ID and associate it with the given `listener`. The
-        new table ID is returned. If `dispatcher` is given, use it instead of
-        the session's Dispatcher instance to dispatch update events for this
-        table."""
-        self._table_id += 1
-        table = Table(client, self._table_id, mode, item_factory)
-        self._table_map[table.id_] = table
-        self.send_control(make_op(OP_ADD_SILENT if silent else OP_ADD,
-            item_ids=item_ids, schema=schema, mode=mode,
-            buffer_size=buffer_size, max_frequency=max_frequency,
-            snapshot=snapshot))
-        return table
-
-    def _parse_and_raise_status(self, fp):
+    def _parse_and_raise_status(self, req, line_it):
         """Parse the status part of a control/session create/bind response.
         Either a single "OK", or "ERROR" followed by the error description. If
         ERROR, raise RequestFailed.
         """
-        if fp.getcode() != 200:
-            raise TransientError('HTTP status %d', fp.getcode())
-        more = lambda: fp.readline().rstrip('\r\n')
-        status = more()
+        if req.status_code != 200:
+            raise TransientError('HTTP status %d', req.status_code)
+        status = next(line_it)
         if status.startswith('SYNC ERROR'):
             raise SessionExpired()
         if not status.startswith('OK'):
-            raise TransientError('%s %s: %s' % (word, more(), more()))
+            raise TransientError('%s %s: %s' %
+                (status, next(line_it), next(line_it)))
 
-    def _parse_session_info(self, fp):
+    def _parse_session_info(self, line_it):
         """Parse the headers from `fp` sent immediately following an OK
         message, and store them in self.session."""
-        for line in fp:
-            if not line.rstrip():
-                break
-            bits = line.rstrip().split(':', 1)
-            self._session[bits[0]] = bits[1]
+        # Requests' iter_lines() has some issues with \r.
+        blanks = 0
+        for line in line_it:
+            if line:
+                blanks = 0
+                key, value = line.rstrip().split(':', 1)
+                self._session[key] = value
+            else:
+                blanks += 1
+                if blanks == 2:
+                    break
+
         self.control_url = _replace_url_host(self.base_url,
             self._session.get('ControlAddress'))
-        self.log.debug('Session: %r', self._session)
+        assert self._session, 'Session parse failure'
 
     def _create_session_impl(self, dct):
         """Worker for create_session()."""
         assert self._state == STATE_DISCONNECTED
         self._set_state(STATE_CONNECTING)
         try:
-            fp = self._post('create_session.txt', urllib.urlencode(dct))
-            self._parse_and_raise_status(fp)
+            req = self._post('create_session.txt', urllib.urlencode(dct))
+            line_it = req.iter_lines(chunk_size=1)
+            self._parse_and_raise_status(req, line_it)
         except Exception:
             self._set_state(STATE_DISCONNECTED)
             raise
-        self._parse_session_info(fp)
+        self._parse_session_info(line_it)
         self._thread = threading.Thread(target=self._recv_main)
         self._thread.setDaemon(True)
         self._thread.start()
@@ -690,22 +599,33 @@ class LsClient(object):
             ('LS_keepalive_millis', keepalive_ms)
         )))
 
-    def _send_control_impl(self, ops):
+    def _send_control_impl(self):
         """Worker function for send_control()."""
         assert self._session['SessionId']
-        if not isinstance(ops, list):
-            ops = [ops]
+        if not self._control_queue:
+            return
 
-        bits = (_encode_op(op, self._session['SessionId']) for op in ops)
-        fp = self._post('control.txt', data='\r\n'.join(bits),
+        # Sleep waiting for uncork. On each wake ensure connection hasn't died.
+        # If it has, we're blocking the thread needed for a reconnect, so get
+        # out of the way.
+        while not self._uncorked.wait(0.3):
+            if self._state == STATE_DISCONNECTED:
+                return
+
+        with self._lock:
+            queue = self._control_queue
+            self._control_queue = []
+
+        # TODO: maximum submit size.
+        id_ = self._session['SessionId']
+        bits = (urllib.urlencode(dict(op, LS_session=id_)) for op in queue)
+        req = self._post('control.txt', data='\r\n'.join(bits),
             base_url=self._control_url)
-        try:
-            self._parse_and_raise_status(fp)
-            self.log.debug('Control message successful.')
-        finally:
-            fp.close()
+        self._parse_and_raise_status(req, req.iter_lines())
+        self.log.debug('Control message successful.')
 
-    def send_control(self, ops):
-        """Send one or more control messages to the server. `ops` is either a
-        single dict returned by `make_op()`, or a list of dicts."""
-        self._work_queue.push(self._send_control_impl, ops)
+    def send_control(self, op):
+        """Enqueue a control message for sending to the server."""
+        with self._lock:
+            self._control_queue.append(op)
+        self._work_queue.push(self._send_control_impl)
