@@ -197,9 +197,10 @@ def _decode_field(s, prev=None):
 
 def run_and_log(func, *args, **kwargs):
     """Invoke a function, logging any raised exceptions. Returns False if an
-    exception was raised."""
+    exception was raised, otherwise True."""
     try:
         func(*args, **kwargs)
+        return True
     except Exception:
         LOG.exception('While invoking %r(*%r, **%r)', func, args, kwargs)
         remove.append(func)
