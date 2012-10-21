@@ -22,12 +22,15 @@ from setuptools import setup
 
 
 setup(
-    name =          'py-lightstreamer',
-    version =       '0.1',
-    description =   'Lightstreamer HTTP client for Python.',
-    author =        'David Wilson',
-    author_email =  'dw@botanicus.net',
-    license =       'AGPL3',
-    url =           'http://github.com/dw/py-lightstreamer/',
-    py_modules =    ['lightstreamer']
+    name='py-lightstreamer',
+    version='0.1',
+    description='Lightstreamer HTTP client for Python.',
+    author='David Wilson',
+    author_email='dw@botanicus.net',
+    license='Apache 2',
+    url='http://github.com/dw/py-lightstreamer/',
+    py_modules=['lightstreamer'],
+    install_requires=[
+        'requests'
+    ]
 )
