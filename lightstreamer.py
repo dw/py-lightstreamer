@@ -295,7 +295,7 @@ class Table(object):
     def delete(self):
         """Instruct the server and LsClient to discard this table."""
         self.client.send_control(OP_DELETE, self.table_id)
-        self.client._forget_table(self.table_id)
+        self.client.deallocate(self.table_id)
 
     def _dispatch_update(self, item_id, item):
         """Called by LsClient to dispatch a table update line."""
