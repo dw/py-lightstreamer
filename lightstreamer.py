@@ -14,28 +14,7 @@
 # limitations under the License.
 #
 
-"""Quick'n'dirty Lightstreamer HTTP client.
-
-Example:
-    def connect():
-        client.create_session(username='me', adapter_set='MyAdaptor')
-        table = lightstreamer.Table(client, item_ids='my_id', schema='my_schema')
-        table.on_update(on_update)
-
-    def on_connection_state(state):
-        print 'CONNECTION STATE:', state
-        if state == lightstreamer.STATE_DISCONNECTED:
-            connect()
-
-    def on_update(item_id, data):
-        print 'UPDATE!', data
-
-    client = lightstreamer.LsClient('http://www.example.com/')
-    client.on_connection_state(on_connection_state)
-
-    connect()
-    while True:
-        signal.pause()
+"""Quick'n'dirty threaded Lightstreamer HTTP client.
 """
 
 from __future__ import absolute_import
@@ -211,7 +190,7 @@ def run_and_log(func, *args, **kwargs):
 
 def dispatch(lst, *args, **kwargs):
     """Invoke every function in `lst` as func(*args, **kwargs), logging any
-    exceptions that are thrown."""
+    exceptions and removing the exception-raising functions."""
     for func in list(lst):
         if not run_and_log(func, *args, **kwargs):
             lst.remove(func)
@@ -249,7 +228,17 @@ class WorkQueue(object):
 
 
 class Table(object):
-    """Lightstreamer table."""
+    """Lightstreamer table.
+
+    Abstracts management of a single table, and wraps incoming data in a
+    `row_factory` to allow simple conversion to the user's native data format.
+
+    Callers should subscribe a function at least to on_update() to receive row
+    updates, and possibly also on_end_of_snapshot() to know when the first set
+    of complete rows has been received.
+
+    The table create request is enqueued during construction.
+    """
     def __init__(self, client, item_ids, mode=None, data_adapter=None,
             buffer_size=None, row_factory=None, max_frequency=None,
             schema=None, selector=None, silent=False, snapshot=True):
@@ -315,11 +304,16 @@ class Table(object):
 
 
 class LsClient(object):
-    """Lightstreamer client.
+    """Manages a single Lightstreamer session. Callers are expected to:
 
-    This presents an asynchronous interface to the user, accepting messages and
-    responding to them using events raised through a Dispatcher instance; refer
-    to comments around the various STATE_* constants.
+        * Create an instance and subscribe to on_connection_state().
+        * Call create_session().
+        * Create lightstreamer.Table instances, or manually call allocate().
+        * Subscribe to each Table's on_update().
+        * Call destroy() to shut down.
+
+    create_session() and send_control() calls are completed asynchronously on a
+    private thread.
     """
     def __init__(self, base_url, work_queue=None, content_length=None):
         """Create an instance using `base_url` as the root of the Lightstreamer
