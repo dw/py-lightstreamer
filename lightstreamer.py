@@ -213,7 +213,7 @@ def dispatch(lst, *args, **kwargs):
     """Invoke every function in `lst` as func(*args, **kwargs), logging any
     exceptions that are thrown."""
     for func in list(lst):
-        if run_and_log(func, *args, **kwargs):
+        if not run_and_log(func, *args, **kwargs):
             lst.remove(func)
 
 
