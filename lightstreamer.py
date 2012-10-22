@@ -380,7 +380,7 @@ class LsClient(object):
         table_id, item_id = map(int, table_info[:2])
         func = self._table_cb_map.get(table_id)
         if not func:
-            self.log.warning('Unknown table %r; dropping row', table_id)
+            self.log.debug('Unknown table %r; dropping row', table_id)
             return
 
         if table_info[-1] == 'EOS':
