@@ -390,9 +390,9 @@ class LsClient(object):
             return
 
         if table_info[-1] == 'EOS':
-            func(item_id, 'EOS')
+            run_and_log(func, item_id, 'EOS')
         else:
-            func(item_id, bits[1:])
+            run_and_log(func, item_id, bits[1:])
 
     # Constants for _recv_line -> _do_recv communication.
     R_OK, R_RECONNECT, R_END = range(3)
@@ -470,7 +470,7 @@ class LsClient(object):
         self._thread = None
         self._session.clear()
         self._control_url = None
-        self.log.info('Receive thread exiting')
+        self.log.debug('Receive thread exiting')
 
     def allocate(self, func):
         """Allocate a table identifier and set `func` as its update callback.
