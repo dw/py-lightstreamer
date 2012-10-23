@@ -17,3 +17,5 @@ client.on_connection_state(on_connection_state)
 
 connect()
 raw_input('Press CR to exit')
+client.destroy()
+client.join()
