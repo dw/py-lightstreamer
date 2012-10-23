@@ -20,7 +20,7 @@ Before consuming a Lightstreamer service you must collect a few requisite settin
   This string is parsed by the data adapter and is usually a list of space or pipe-separated identifiers; it identifies the list of fields to subscribe to for each item in the item group. It is passed as the ``LS_schema`` POST parameter to ``control.txt`` or ``control.js`` when ``LS_op=add``.
 
 **Table Mode**
-  This specifies the expected update mode for the target table, it is passed as the ``LS_mode`` POST parameter to ``control.txt`` or ``control.js`` when ``LS_op=add``.
+  This specifies the expected update mode for the target table, it is passed as the ``LS_mode`` POST parameter to ``control.txt`` or ``control.js`` when ``LS_op=add``. Note that a common cause of no data received from the server is setting the wrong table mode.
 
 **Username and Password**
   Your Lightstreamer server might not require a username and password, but if it does, these fields are visible as the ``LS_user`` and ``LS_password`` POST parameters to ``create_session.txt`` or ``create_session.js``.
@@ -71,6 +71,7 @@ Session creation runs on a private thread, so ``create_session()`` will return c
     # incoming list of strings to a tuple of floats.
     table = lightstreamer.Table(client,
         data_adapter='AccountInfoAdapter',
+        mode=lightstreamer.MODE_MERGE,
         item_ids='account_1|account_2',
         schema='total_credits|total_debits',
         row_factory=lambda row: tuple(float(v) for v in row)
