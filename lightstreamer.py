@@ -325,6 +325,7 @@ class LsClient(object):
         self.content_length = content_length
         self.log = logging.getLogger('lightstreamer.LsClient')
         self._state_funcs = []
+        self._heartbeat_funcs = []
         self._table_id = 0
         self._table_cb_map = {}
         self._session = {}
@@ -338,6 +339,11 @@ class LsClient(object):
         """Subscribe `func` to connection state changes. Sole argument, `state`
         is one of the STATE_* constants."""
         self._state_funcs.append(func)
+
+    def on_heartbeat(self, func):
+        """Subscribe `func` to PROBE messages. The function is called with no
+        arguments each time the connection falls idle."""
+        self._heartbeat_funcs.append(func)
 
     def _set_state(self, state):
         """Emit an event indicating the connection state has changed, taking
@@ -397,6 +403,7 @@ class LsClient(object):
         raises Terminated to indicate the server doesn't like us any more."""
         if line.startswith('PROBE'):
             self.log.debug('Received server probe.')
+            dispatch(self._heartbeat_funcs)
             return self.R_OK
         elif line.startswith('LOOP'):
             self.log.debug('Server indicated length exceeded; reconnecting.')
