@@ -52,7 +52,7 @@ Consumer code creates a session and subscribes to data by:
     def on_connection_state(state):
         print 'New state:', state
 
-    client.on_connection_state(state)
+    client.on_connection_state(on_connection_state)
 
 3. Call ``create_session()`` to initialize the connection:
 
