@@ -87,6 +87,9 @@ Session creation runs on a private thread, so ``create_session()`` will return c
 
     table.on_update(on_bank_balance_changed)
 
+Note that due to how Lightstreamer works, initial rows may contain ``None`` instead of a string. This is dependent partially on table mode (at least ``MODE_MERGE`` and ``MODE_RAW``) and also whether ``snapshot=True`` is specified, and supported by the server.
+
+
 6. Consume data as desired until it becomes uninteresting. To cancel a subscription to a single table, use ``table.delete()``, or alternatively ``client.destroy()`` followed by ``client.join()`` to shut down the entire client.
 
 **Warning**: never invoke ``client.join()`` from a Lightstreamer callback, as this will result in deadlock.
