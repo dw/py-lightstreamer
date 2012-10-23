@@ -33,7 +33,7 @@ Before consuming a Lightstreamer service you must collect a few requisite settin
 Synopsis
 --------
 
-The library exports ``LsClient`` and ``Table`` as its main classes. Both classes are expected to be consumed by event-driven code, where it's natural to make use of callbacks for receiving data.
+The library exports ``LsClient`` and ``Table`` as its main classes. Both classes are expected to be consumed by event-driven code, where it's natural to make use of callbacks for receiving data. Refer to the output of ``pydoc lightstreamer`` for a full API reference.
 
 Callbacks are always invoked from a single thread private to each ``LsClient``. For this reason any long running code for responding to an event should be deferred to another thread, otherwise you will block the ``LsClient`` implementation.
 
