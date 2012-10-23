@@ -100,11 +100,11 @@ Integration with Twisted can be achieved by simply wrapping all callbacks in ``t
 
 ::
 
-    def wrap_callback(func, *args, **kwargs):
-        return lambda: reactor.callFromThread(func, *args, **kwargs)
+    def wrap(func):
+        return lambda *args: reactor.callFromThread(func, *args)
 
-    client.on_connection_state(wrap_callback(self._on_connection_state))
-    table.on_update(wrap_callback(self._on_update))
+    client.on_connection_state(wrap(self._on_connection_state))
+    table.on_update(wrap(self._on_update))
     # etc.
 
 A future version of the library might tidy this up a little.
