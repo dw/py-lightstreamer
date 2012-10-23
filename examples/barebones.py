@@ -1,4 +1,7 @@
 
+import lightstreamer
+
+
 def on_connection_state(state):
     print 'CONNECTION STATE:', state
     if state == lightstreamer.STATE_DISCONNECTED:
