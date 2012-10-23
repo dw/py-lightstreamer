@@ -341,8 +341,8 @@ class LsClient(object):
         self._state_funcs.append(func)
 
     def on_heartbeat(self, func):
-        """Subscribe `func` to PROBE messages. The function is called with no
-        arguments each time the connection falls idle."""
+        """Subscribe `func` to heartbeats. The function is called with no
+        arguments each time the connection receives any data."""
         self._heartbeat_funcs.append(func)
 
     def _set_state(self, state):
@@ -401,9 +401,9 @@ class LsClient(object):
         """Parse a line from Lightstreamer and act accordingly. Returns True to
         keep the connection alive, False to indicate time to reconnect, or
         raises Terminated to indicate the server doesn't like us any more."""
+        dispatch(self._heartbeat_funcs)
         if line.startswith('PROBE'):
             self.log.debug('Received server probe.')
-            dispatch(self._heartbeat_funcs)
             return self.R_OK
         elif line.startswith('LOOP'):
             self.log.debug('Server indicated length exceeded; reconnecting.')
