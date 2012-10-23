@@ -92,6 +92,25 @@ Session creation runs on a private thread, so ``create_session()`` will return c
 **Warning**: never invoke ``client.join()`` from a Lightstreamer callback, as this will result in deadlock.
 
 
+
+Connection States
+-----------------
+
+The following module constants are passed as the parameter to ``on_connection_state()``.
+
+``lighstreamer.STATE_CONNECTING``:
+  A session does not yet exist, we're in the process of connecting for the first time. Any control messages will be buffered until after connection.
+
+``lightstreamer.STATE_CONNECTED``:
+  Connected and forwarding messages. If no messages are available for forwarding, ``on_heartbeat()`` will fire at regular intervals to indicate the connection is still alive.
+
+``lightstreamer.STATE_RECONNECTING``:
+   A session exists, we're just in the process of reconnecting because the server indicated it was time to do so. A healthy connection will alternate between ``STATE_RECONNECTING`` and ``STATE_CONNECTED`` states as ``LS_content_length`` is exceeded.
+
+``lightstreamer.STATE_DISCONNECTED``:
+  Could not connect and will not retry because the server indicated a permanent error. After entering this state the thread stops, and session information is cleared. You must call ``create_session()`` to restart the session.  This is the default state.
+
+
 General Upset
 -------------
 
