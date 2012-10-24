@@ -306,7 +306,7 @@ class Table(object):
 class LsClient(object):
     """Manages a single Lightstreamer session. Callers are expected to:
 
-        * Create an instance and subscribe to on_connection_state().
+        * Create an instance and subscribe to on_state().
         * Call create_session().
         * Create lightstreamer.Table instances, or manually call allocate().
         * Subscribe to each Table's on_update().
@@ -335,7 +335,7 @@ class LsClient(object):
         # Prevent enqueued control messages from being sent.
         self._uncorked = threading.Event()
 
-    def on_connection_state(self, func):
+    def on_state(self, func):
         """Subscribe `func` to connection state changes. Sole argument, `state`
         is one of the STATE_* constants."""
         self._state_funcs.append(func)

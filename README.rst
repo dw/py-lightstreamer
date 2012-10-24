@@ -45,14 +45,14 @@ Consumer code creates a session and subscribes to data by:
 
     client = lightstreamer.LsClient(MY_LIGHTSTREAMER_URL)
 
-2. Optionally subscribing to the ``on_connection_state()`` event:
+2. Optionally subscribing to the ``on_state()`` event:
 
 ::
 
-    def on_connection_state(state):
+    def on_state(state):
         print 'New state:', state
 
-    client.on_connection_state(on_connection_state)
+    client.on_state(on_state)
 
 3. Call ``create_session()`` to initialize the connection:
 
@@ -61,7 +61,7 @@ Consumer code creates a session and subscribes to data by:
     client.create_session(adapter_set='my_adapter_set',
         username='my_username', password='my_password')
 
-Session creation runs on a private thread, so ``create_session()`` will return control to the caller immediately. For this reason you should subscribe to ``on_connection_state()``, where  ``lightstreamer.STATE_CONNECTED`` will be reported once creation succeeds.
+Session creation runs on a private thread, so ``create_session()`` will return control to the caller immediately. For this reason you should subscribe to ``on_state()``, where  ``lightstreamer.STATE_CONNECTED`` will be reported once creation succeeds.
 
 4. Instantiate one or more ``Table`` instances, optionally including a ``row_factory`` to deserialize incoming rows:
 
@@ -99,7 +99,7 @@ Note that due to how Lightstreamer works, initial rows may contain ``None`` inst
 Connection States
 -----------------
 
-The following module constants are passed as the parameter to ``on_connection_state()``.
+The following module constants are passed as the parameter to ``on_state()``.
 
 ``lightstreamer.STATE_CONNECTING``
   A session does not yet exist, we're in the process of connecting for the first time. Any control messages will be buffered until after connection.
@@ -126,7 +126,7 @@ Integration with Twisted can be achieved by simply wrapping all callbacks in ``t
     def wrap(func):
         return lambda *args: reactor.callFromThread(func, *args)
 
-    client.on_connection_state(wrap(self._on_connection_state))
+    client.on_state(wrap(self._on_state))
     table.on_update(wrap(self._on_update))
     # etc.
 
