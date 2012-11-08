@@ -241,7 +241,7 @@ class Table(object):
     """
     def __init__(self, client, item_ids, mode=None, data_adapter=None,
             buffer_size=None, row_factory=None, max_frequency=None,
-            schema=None, selector=None, silent=False, snapshot=True):
+            schema=None, selector=None, silent=False, snapshot=False):
         """Create a new table. See LsClient.send_control() for descriptions of
         most parameters, except:
 
