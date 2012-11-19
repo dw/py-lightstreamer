@@ -582,8 +582,12 @@ class LsClient(object):
 
         # Sleep waiting for uncork. On each wake ensure connection hasn't died.
         # If it has, we're blocking the thread needed for a reconnect, so get
-        # out of the way.
-        while not self._uncorked.wait(0.3):
+        # out of the way. On Python 2.6/Debian 6.0, wait() does not return the
+        # internal flag as documented, so this loop is a bit ugly.
+        while True:
+            self._uncorked.wait(0.3)
+            if self._uncorked.isSet():
+                break
             if self._state == STATE_DISCONNECTED:
                 return
 
