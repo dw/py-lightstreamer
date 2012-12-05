@@ -1,10 +1,19 @@
+
 py-lightstreamer
 ================
+
+`http://github.com/dw/py-lightstreamer <http://github.com/dw/py-lightstreamer>`_
+
+.. toctree::
+    :maxdepth: 4
+    :hidden:
+
 
 This is a basic Python client library for `Lightstreamer <http://www.lightstreamer.com/>`_'s HTTP text protocol implemented using threads.
 
 Required Parameters
--------------------
+###################
+
 Before consuming a Lightstreamer service you must collect a few requisite settings. These can easily be found by observing an existing application's HTTP requests, e.g. via Firebug or Wireshark.
 
 **Adapter Set**
@@ -31,7 +40,7 @@ Before consuming a Lightstreamer service you must collect a few requisite settin
 
 
 Synopsis
---------
+########
 
 The library exports ``LsClient`` and ``Table`` as its main classes. Both classes are expected to be consumed by event-driven code, where it's natural to make use of callbacks for receiving data. Refer to the output of ``pydoc lightstreamer`` for a full API reference.
 
@@ -97,7 +106,7 @@ Note that due to how Lightstreamer works, initial rows may contain ``None`` inst
 
 
 Connection States
------------------
+#################
 
 The following module constants are passed as the parameter to ``on_state()``.
 
@@ -114,8 +123,28 @@ The following module constants are passed as the parameter to ``on_state()``.
   Could not connect and will not retry because the server indicated a permanent error. After entering this state the thread stops, and session information is cleared. You must call ``create_session()`` to restart the session.  This is the default state.
 
 
+Interface
+#########
+
+Client Interface
+++++++++++++++++
+
+.. autoclass:: lightstreamer.LsClient
+    :members:
+
+
+Table Interface
++++++++++++++++
+
+
+.. autoclass:: lightstreamer.Table
+    :members:
+
+
+
 General Upset
--------------
+#############
+
 
 The current implementation is threaded, which sucks. Unfortunately the only alternative solutions to asynchronous networking suck also, as they impose huge frameworks or runtime constraints on consumer code. So for the time being threads prevail.
 
