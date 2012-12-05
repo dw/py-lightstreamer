@@ -9,7 +9,7 @@
       1000), then a socket timeout of about 3x that. The goal being steady flow
       of messages, and avoiding the cost of long time to detect failure and
       resulting session expiry/reestablishment.
-
+    * Enable SO_KEEPALIVE.
 
 DONE
     * Pay attention to server-advertised hostname in the session response,
