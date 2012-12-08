@@ -325,7 +325,7 @@ class Table(object):
         self._last_item_map = {}
         #: This is a dict mapping item IDs to the last known value for
         #: the particular item. Note that if no updates have been received
-        #: for a specified item ID, it will have no entry here.
+        #: for a particular item, it will have no entry here.
         self.items = {}
         client._register(self)
 
