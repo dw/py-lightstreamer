@@ -54,14 +54,14 @@ Consumer code creates a session and subscribes to data by:
 
     client = lightstreamer.LsClient(MY_LIGHTSTREAMER_URL)
 
-2. Optionally subscribing to the ``on_state()`` event:
+2. Optionally subscribing to the ``on_state`` event:
 
 ::
 
     def on_state(state):
         print 'New state:', state
 
-    client.on_state(on_state)
+    client.on_state.listen(on_state)
 
 3. Call ``create_session()`` to initialize the connection:
 
@@ -70,23 +70,23 @@ Consumer code creates a session and subscribes to data by:
     client.create_session(adapter_set='my_adapter_set',
         username='my_username', password='my_password')
 
-Session creation runs on a private thread, so ``create_session()`` will return control to the caller immediately. For this reason you should subscribe to ``on_state()``, where  ``lightstreamer.STATE_CONNECTED`` will be reported once creation succeeds.
+Session creation runs on a private thread, so ``create_session()`` will return control to the caller immediately. For this reason you should subscribe to ``on_state``, where  ``lightstreamer.STATE_CONNECTED`` will be reported once creation succeeds.
 
-4. Instantiate one or more ``Table`` instances, optionally including a ``row_factory`` to deserialize incoming rows:
+4. Instantiate one or more ``Table`` instances, optionally including a ``item_factory`` to deserialize incoming rows:
 
 ::
 
-    # Subscribe to bank balance. Supply a row_factory that converts the
+    # Subscribe to bank balance. Supply a item_factory that converts the
     # incoming list of strings to a tuple of floats.
     table = lightstreamer.Table(client,
         data_adapter='AccountInfoAdapter',
         mode=lightstreamer.MODE_MERGE,
         item_ids='account_1|account_2',
         schema='total_credits|total_debits',
-        row_factory=lambda row: tuple(float(v) for v in row)
+        item_factory=lambda row: tuple(float(v) for v in row)
     )
 
-5. Subscribe to the ``on_update()`` event:
+5. Subscribe to the ``on_update`` event:
 
 ::
 
@@ -94,7 +94,7 @@ Session creation runs on a private thread, so ``create_session()`` will return c
         print 'Total credits:', row[0]
         print 'Total debits:', row[1]
 
-    table.on_update(on_bank_balance_changed)
+    table.on_update.listen(on_bank_balance_changed)
 
 Note that due to how Lightstreamer works, initial rows may contain ``None`` instead of a string. This is dependent partially on table mode (at least ``MODE_MERGE`` and ``MODE_RAW``) and also whether ``snapshot=True`` is specified, and supported by the server.
 
@@ -104,11 +104,10 @@ Note that due to how Lightstreamer works, initial rows may contain ``None`` inst
 **Warning**: never invoke ``client.join()`` from a Lightstreamer callback, as this will result in deadlock.
 
 
-
 Connection States
 #################
 
-The following module constants are passed as the parameter to ``on_state()``.
+The following module constants are passed as the parameter to ``on_state``.
 
 ``lightstreamer.STATE_CONNECTING``
   A session does not yet exist, we're in the process of connecting for the first time. Any control messages will be buffered until after connection.
@@ -136,10 +135,15 @@ Client Interface
 Table Interface
 +++++++++++++++
 
-
 .. autoclass:: lightstreamer.Table
     :members:
 
+
+Event Interface
++++++++++++++++
+
+.. autoclass:: lightstreamer.Event
+    :members:
 
 
 General Upset
@@ -155,8 +159,8 @@ Integration with Twisted can be achieved by simply wrapping all callbacks in ``t
     def wrap(func):
         return lambda *args: reactor.callFromThread(func, *args)
 
-    client.on_state(wrap(self._on_state))
-    table.on_update(wrap(self._on_update))
+    client.on_state.listen(wrap(self._on_state))
+    table.on_update.listen(wrap(self._on_update))
     # etc.
 
 A future version of the library might tidy this up a little.
