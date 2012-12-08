@@ -23,7 +23,7 @@ from setuptools import setup
 
 setup(
     name='py-lightstreamer',
-    version='0.3',
+    version='0.4',
     description='Lightstreamer HTTP client for Python.',
     author='David Wilson',
     author_email='dw@botanicus.net',

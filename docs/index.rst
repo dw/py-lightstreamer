@@ -99,7 +99,7 @@ Session creation runs on a private thread, so ``create_session()`` will return c
 Note that due to how Lightstreamer works, initial rows may contain ``None`` instead of a string. This is dependent partially on table mode (at least ``MODE_MERGE`` and ``MODE_RAW``) and also whether ``snapshot=True`` is specified, and supported by the server.
 
 
-6. Consume data as desired until it becomes uninteresting. To cancel a subscription to a single table, use ``table.delete()``, or alternatively ``client.destroy()`` followed by ``client.join()`` to shut down the entire client.
+6. Consume data as desired until it becomes uninteresting. To cancel a subscription to a single table, use ``client.delete(table)``, or alternatively ``client.destroy()`` followed by ``client.join()`` to shut down the entire client.
 
 **Warning**: never invoke ``client.join()`` from a Lightstreamer callback, as this will result in deadlock.
 
@@ -120,7 +120,7 @@ The following module constants are passed as the parameter to ``on_state()``.
    A session exists, we're just in the process of reconnecting because the server indicated it was time to do so. A healthy connection will alternate between ``STATE_RECONNECTING`` and ``STATE_CONNECTED`` states as ``LS_content_length`` is exceeded.
 
 ``lightstreamer.STATE_DISCONNECTED``
-  Could not connect and will not retry because the server indicated a permanent error. After entering this state the thread stops, and session information is cleared. You must call ``create_session()`` to restart the session.  This is the default state.
+  Could not connect and will not retry because the server indicated a permanent error. After entering this state the thread stops, and session information is cleared. You must call ``create_session()`` to restart the session.  This is the default state. Table subscription information is preserved such that a new call to ``client.create_session()`` will result in all existing subscriptions to be recreated in the new session.
 
 
 Interface
