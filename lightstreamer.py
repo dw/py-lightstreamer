@@ -257,7 +257,7 @@ def event_property(name, doc):
     def fget(self):
         event = getattr(self, var_name, None)
         if not event:
-            event = Event(name)
+            event = Event()
             setattr(self, var_name, event)
         return event
     return property(fget, doc=doc)
@@ -267,13 +267,13 @@ class Table(object):
     """Lightstreamer table.
 
     Abstracts management of a single table, and wraps incoming data in a
-    `row_factory` to allow simple conversion to the user's native data format.
+    `item_factory` to allow simple conversion to the user's native data format.
 
     Callers should subscribe a function at least to on_update() to receive row
     updates, and possibly also on_end_of_snapshot() to know when the first set
     of complete rows has been received.
 
-    The table create request is enqueued during construction.
+    The table is registed with the given `LsClient` during construction.
     """
     on_update = event_property('on_update',
         """Fired when the client receives a new update message (i.e. data).
@@ -283,7 +283,7 @@ class Table(object):
         representing a snapshot have been sent successfully.""")
 
     def __init__(self, client, item_ids, mode=None, data_adapter=None,
-            buffer_size=None, row_factory=None, max_frequency=None,
+            buffer_size=None, item_factory=None, max_frequency=None,
             schema=None, selector=None, silent=False, snapshot=False):
         """Create a new table.
 
@@ -304,7 +304,7 @@ class Table(object):
             'yes, but only send N items.
         `silent`: If True, server won't start delivering events until
             start() is called.
-        `row_factory`: Passed a sequence of strings-or-None for each row
+        `item_factory`: Passed a sequence of strings-or-None for each row
             received, expected to return some object representing the row.
             Defaults to tuple().
         """
@@ -315,7 +315,7 @@ class Table(object):
         self.mode = mode or MODE_MERGE
         self.data_adapter = data_adapter
         self.buffer_size = buffer_size
-        self.row_factory = row_factory or tuple
+        self.item_factory = item_factory or tuple
         self.max_frequency = max_frequency
         self.schema = schema
         self.selector = selector
@@ -323,6 +323,10 @@ class Table(object):
         self.snapshot = snapshot
 
         self._last_item_map = {}
+        #: This is a dict mapping item IDs to the last known value for
+        #: the particular item. Note that if no updates have been received
+        #: for a specified item ID, it will have no entry here.
+        self.items = {}
         client._register(self)
 
     def _dispatch_update(self, item_id, item):
@@ -333,7 +337,8 @@ class Table(object):
         last = dict(enumerate(self._last_item_map.get(item_id, [])))
         fields = [_decode_field(s, last.get(i)) for i, s in enumerate(item)]
         self._last_item_map[item_id] = fields
-        self.on_update.fire(item_id, self.row_factory(fields))
+        self.items[item_id] = self.item_factory(fields)
+        self.on_update.fire(item_id, self.items[item_id])
 
 
 class LsClient(object):
