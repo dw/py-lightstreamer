@@ -405,7 +405,7 @@ class LsClient(object):
         HTTP exception is thrown, log an error and return the exception."""
         url = urlparse.urljoin(base_url or self.base_url, suffix)
         try:
-            return requests.post(url, data=data, prefetch=False,
+            return requests.post(url, data=data, stream=True,
                 timeout=self._get_request_timeout())
         except urllib2.HTTPError, e:
             self.log.error('HTTP %d for %r', e.getcode(), url)
